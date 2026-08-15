@@ -1,13 +1,12 @@
 name: BedrockMovementFix
-version: 2.1.0
+version: 2.1.1
 main: com.votri.bedrockmovementfix.BedrockMovementFixPlugin
 api-version: '1.21'
 author: VoTri
-description: Conservative Bedrock movement watchdog for Paper 1.21.11
+description: Conservative Bedrock special-block movement watchdog
 softdepend:
   - floodgate
-
 permissions:
   bedrockmovementfix.bypass:
-    description: Completely bypass BedrockMovementFix
+    description: Bypass BedrockMovementFix
     default: op

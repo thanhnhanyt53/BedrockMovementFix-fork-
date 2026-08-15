@@ -1,56 +1,46 @@
-# BedrockMovementFix 2.1.0
-# Watchdog mode. No ProtocolLib or PacketEvents dependency.
-#
-# IMPORTANT:
-# Bukkit/Paper cannot see Bedrock packets that were lost before reaching
-# the backend. This watchdog detects a server-observable stall pattern and
-# can send ONE authoritative Bukkit teleport/sync pulse. It does NOT
-# teleport every tick and never calls PlayerFailMoveEvent#setAllowed(true).
-
+# BedrockMovementFix 2.1.1
 enabled: true
 debug: true
-
 bedrock-only: true
-bypass-permission: "bedrockmovementfix.bypass"
+bypass-permission: bedrockmovementfix.bypass
 
-# Watchdog polling interval.
-watchdog-interval-ticks: 5
+# Watchdog cadence.
+watchdog-interval-ticks: 2
 
-# Consider the player stalled when there is no accepted movement for this
-# many milliseconds while activity continues.
-stall-ms: 700
+# A fail sequence must contain this many CLIPPED_INTO_BLOCK failures
+# inside fail-move-window-ms before it can qualify.
+fail-move-threshold: 4
+fail-move-window-ms: 1000
 
-# Activity remains "fresh" for this long after interaction/animation.
-activity-window-ms: 900
+# Movement stall requirement.
+stall-ms: 350
+minimum-movement-delta: 0.02
 
-# After a correction, do not correct again for this long.
+# Recent movement/failure activity window.
+activity-window-ms: 1200
+
+# One-shot correction cooldown.
 correction-cooldown-ms: 3000
 
-# Ignore players shortly after join/teleport/world change.
+# Grace periods prevent correction immediately after lifecycle changes.
 join-grace-ms: 2500
 teleport-grace-ms: 1200
 world-change-grace-ms: 1200
 
-# Only trigger the special-block branch when the player is within this
-# horizontal/vertical radius of a configured block.
+# Special-block proximity.
 special-block-radius: 1.75
-
-# Correction safety:
-#  - same-location: resend the server-authoritative position/rotation once.
-#  - last-accepted: restore the last accepted position only if it differs
-#    by no more than max-restore-distance.
-correction-mode: same-location
-max-restore-distance: 1.50
-
-# Special block signals.
 special-blocks:
   - BAMBOO
   - BAMBOO_SAPLING
 
-# FailMove signals are diagnostic and can qualify a watchdog incident.
-handle-fail-move: true
+# Safest correction: resend the player's current server location/rotation.
+# Alternative: last-accepted (only when <= max-restore-distance).
+correction-mode: same-location
+max-restore-distance: 1.50
 
-# Do not correct players in these states.
+# Never force PlayerFailMoveEvent#setAllowed(true).
+never-allow-failed-move: true
+
 ignore-dead: true
 ignore-spectator: true
 ignore-vehicles: true
