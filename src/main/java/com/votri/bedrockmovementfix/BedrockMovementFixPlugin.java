@@ -30,10 +30,10 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
     private boolean enabled, debug, bedrockOnly, ignoreDead, ignoreSpectator, ignoreVehicles;
     private String bypassPermission;
     private long intervalTicks, failThreshold, failWindowMs;
-    private long suspectWindowMs, confirmationWindowMs, progressWindowMs;
+    private long suspectWindowMs, confirmationWindowMs, progressWindowMs, correlationWindowMs;
     private long activityWindowMs, correctionCooldownMs, joinGraceMs, teleportGraceMs, worldChangeGraceMs;
-    private int minimumProgressSamples, minimumStalledSamples;
-    private double minimumProgressDistance, specialRadius, maxRestoreDistance;
+    private int minimumProgressSamples, minimumStalledSamples, hardStallRequiredSamples;
+    private double minimumProgressDistance, hardStallZeroDistance, specialRadius, maxRestoreDistance;
     private CorrectionMode correctionMode;
 
     @Override public void onEnable() {
@@ -41,7 +41,7 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
         loadConfig();
         Bukkit.getPluginManager().registerEvents(this, this);
         watchdog = Bukkit.getScheduler().runTaskTimer(this, this::watchdogTick, intervalTicks, intervalTicks);
-        getLogger().info("BedrockMovementFix 2.1.3 enabled.");
+        getLogger().info("BedrockMovementFix 2.1.4 enabled.");
         getLogger().info("Mode: CLIPPED burst + directional server-progress hysteresis.");
     }
 
@@ -66,6 +66,7 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
         suspectWindowMs = Math.max(100, getConfig().getLong("suspect-window-ms", 1000));
         confirmationWindowMs = Math.max(100, getConfig().getLong("confirmation-window-ms", 500));
         progressWindowMs = Math.max(100, getConfig().getLong("progress-sample-window-ms", 700));
+        correlationWindowMs = Math.max(500, getConfig().getLong("correlation-window-ms", 1500));
         activityWindowMs = Math.max(100, getConfig().getLong("activity-window-ms", 1200));
         correctionCooldownMs = Math.max(500, getConfig().getLong("correction-cooldown-ms", 3000));
         joinGraceMs = Math.max(0, getConfig().getLong("join-grace-ms", 2500));
@@ -75,6 +76,8 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
         minimumProgressDistance = Math.max(0.001, getConfig().getDouble("minimum-progress-distance", 0.08));
         minimumProgressSamples = Math.max(2, getConfig().getInt("minimum-progress-samples", 3));
         minimumStalledSamples = Math.max(2, getConfig().getInt("minimum-stalled-samples", 3));
+        hardStallRequiredSamples = Math.max(2, getConfig().getInt("hard-stall-required-samples", 3));
+        hardStallZeroDistance = Math.max(0.0001, getConfig().getDouble("hard-stall-zero-distance", 0.005));
         specialRadius = Math.max(.5, getConfig().getDouble("special-block-radius", 1.75));
         maxRestoreDistance = Math.max(0, getConfig().getDouble("max-restore-distance", 1.5));
         correctionMode = CorrectionMode.from(getConfig().getString("correction-mode", "same-location"));
@@ -229,6 +232,9 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
 
         state.lastFailAt = now;
         state.lastActivityAt = now;
+        if ("CLIPPED_INTO_BLOCK".equals(reason)) {
+            state.lastClippedAt = now;
+        }
         state.failures.addLast(new Failure(now, reason));
         trimFailures(state, now);
 
@@ -247,30 +253,33 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
 
             State state = states.get(player.getUniqueId());
             if (state == null || !eligible(player, state, now)) continue;
+
             if (!nearSpecial(player)) {
-                if (state.phase != Phase.NORMAL) {
-                    state.phase = Phase.NORMAL;
-                    debug(player, "STATE -> NORMAL (left special-block area)");
-                }
+                resetDetection(state);
                 continue;
             }
+
+            trimFailures(state, now);
+            trimProgressSamples(state, now);
 
             long clipped = recentClipped(state, now);
             boolean clippedBurst = clipped >= failThreshold;
             boolean active = now - state.lastActivityAt <= activityWindowMs;
-            boolean cooldownReady = now - state.lastCorrectionAt >= correctionCooldownMs;
-
-            boolean stalled = hasDirectionalPositionStall(state, now);
+            boolean recentClippedSignal = state.lastClippedAt > 0
+                    && now - state.lastClippedAt <= correlationWindowMs;
 
             /*
-             * Hysteresis:
-             * NORMAL -> SUSPECTED when collision burst overlaps with movement concern.
-             * SUSPECTED -> CONFIRMED only after sustained directional progress loss.
-             * CONFIRMED -> CORRECTION only if the collision burst is still present.
+             * 2.1.4 correlation model:
+             * CLIPPED opens/keeps suspicion. A later hard stall may confirm it
+             * within the correlation window. Normal movement recovery cancels
+             * suspicion immediately.
              */
+            boolean hardStall = updateHardStall(state, now);
+            boolean recovered = hasMovementRecovery(state, now);
+
             switch (state.phase) {
                 case NORMAL -> {
-                    if (clippedBurst && active && stalled) {
+                    if (clippedBurst && active) {
                         state.phase = Phase.SUSPECTED;
                         state.suspectedAt = now;
                         debug(player, "STATE NORMAL -> SUSPECTED clipped=" + clipped);
@@ -278,35 +287,115 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
                 }
 
                 case SUSPECTED -> {
-                    if (!clippedBurst || !active) {
-                        state.phase = Phase.NORMAL;
-                        debug(player, "STATE SUSPECTED -> NORMAL reason=signal-cleared");
-                    } else if (now - state.suspectedAt > suspectWindowMs) {
-                        state.phase = Phase.NORMAL;
-                        debug(player, "STATE SUSPECTED -> NORMAL reason=suspect-timeout");
-                    } else if (now - state.suspectedAt >= confirmationWindowMs && stalled) {
+                    if (!recentClippedSignal || !active) {
+                        resetDetection(state);
+                        debug(player, "STATE SUSPECTED -> NORMAL reason=correlation-expired");
+                    } else if (recovered) {
+                        resetDetection(state);
+                        debug(player, "STATE SUSPECTED -> NORMAL reason=movement-recovered");
+                    } else if (now - state.suspectedAt <= correlationWindowMs
+                            && hardStall
+                            && hasRecentDirectionalMovement(state, now)) {
                         state.phase = Phase.CONFIRMED;
                         state.confirmedAt = now;
-                        debug(player, "STATE SUSPECTED -> CONFIRMED clipped=" + clipped);
+                        debug(player, "STATE SUSPECTED -> CONFIRMED clipped=" + clipped
+                                + " hardStallSamples=" + state.consecutiveHardStallSamples);
+                    } else if (now - state.suspectedAt > correlationWindowMs) {
+                        resetDetection(state);
+                        debug(player, "STATE SUSPECTED -> NORMAL reason=correlation-timeout");
                     }
                 }
 
                 case CONFIRMED -> {
-                    if (!clippedBurst || !active || !stalled) {
-                        state.phase = Phase.NORMAL;
+                    if (!recentClippedSignal || !active) {
+                        resetDetection(state);
                         debug(player, "STATE CONFIRMED -> NORMAL reason=signal-cleared");
-                    } else if (cooldownReady) {
+                    } else if (recovered) {
+                        resetDetection(state);
+                        debug(player, "STATE CONFIRMED -> NORMAL reason=movement-recovered");
+                    } else if (hardStall
+                            && now - state.confirmedAt <= correlationWindowMs
+                            && now - state.lastCorrectionAt >= correctionCooldownMs) {
                         correctOnce(player, state, now, clipped);
                     }
                 }
             }
 
-            debug(player, "WATCH phase=" + state.phase +
-                    " clipped=" + clipped +
-                    " burst=" + clippedBurst +
-                    " directionalStall=" + stalled +
-                    " active=" + active);
+            debug(player, "WATCH phase=" + state.phase
+                    + " clipped=" + clipped
+                    + " hardStall=" + hardStall
+                    + " hardSamples=" + state.consecutiveHardStallSamples
+                    + " recovered=" + recovered
+                    + " recentClipped=" + recentClippedSignal);
         }
+    }
+
+    private boolean updateHardStall(State state, long now) {
+        trimProgressSamples(state, now);
+
+        if (state.progressSamples.isEmpty()
+                || state.lastDirection == null
+                || now - state.lastDirectionAt > correlationWindowMs) {
+            state.consecutiveHardStallSamples = 0;
+            return false;
+        }
+
+        int consecutive = 0;
+        for (MovementSample sample : state.progressSamples) {
+            if (now - sample.time > correlationWindowMs) continue;
+
+            /*
+             * Hard stall deliberately means essentially zero server-side
+             * displacement. Small movement is NOT treated as hard stall.
+             */
+            if (sample.delta <= hardStallZeroDistance) {
+                consecutive++;
+            } else {
+                consecutive = 0;
+            }
+        }
+
+        state.consecutiveHardStallSamples = consecutive;
+        return consecutive >= hardStallRequiredSamples;
+    }
+
+    private boolean hasRecentDirectionalMovement(State state, long now) {
+        if (state.lastDirection == null) return false;
+        if (now - state.lastDirectionAt > correlationWindowMs) return false;
+
+        boolean found = false;
+        for (MovementSample sample : state.progressSamples) {
+            if (now - sample.time > correlationWindowMs) continue;
+            if (sample.delta >= minimumProgressDistance && sample.direction != null) {
+                double dot = sample.direction.dot(state.lastDirection);
+                if (dot >= 0.25) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        return found;
+    }
+
+    private boolean hasMovementRecovery(State state, long now) {
+        if (state.progressSamples.isEmpty()) return false;
+
+        int recovered = 0;
+        for (MovementSample sample : state.progressSamples) {
+            if (now - sample.time > confirmationWindowMs) continue;
+            if (sample.delta >= minimumProgressDistance) {
+                recovered++;
+            }
+        }
+
+        return recovered >= minimumProgressSamples;
+    }
+
+    private void resetDetection(State state) {
+        state.phase = Phase.NORMAL;
+        state.suspectedAt = 0L;
+        state.confirmedAt = 0L;
+        state.consecutiveHardStallSamples = 0;
     }
 
     private boolean hasDirectionalPositionStall(State state, long now) {
@@ -524,7 +613,8 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
     private static final class State {
         long joinAt, lastMoveAt, lastAcceptedAt, lastMeaningfulProgressAt;
         long lastActivityAt, lastTeleportAt, lastWorldChangeAt, lastFailAt, lastCorrectionAt;
-        long lastDirectionAt, suspectedAt, confirmedAt;
+        long lastDirectionAt, suspectedAt, confirmedAt, lastClippedAt;
+        int consecutiveHardStallSamples;
         long interactions, animations, correctionId;
 
         Location lastAccepted;
