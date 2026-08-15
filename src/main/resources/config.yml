@@ -1,0 +1,43 @@
+# BedrockMovementFix (fork) 2.0.0
+#
+# This version deliberately does NOT force Paper to accept failed movement.
+# Paper remains authoritative over movement validation.
+
+enabled: true
+debug: false
+
+# Only process players recognized by Floodgate.
+bedrock-only: true
+
+# Permission that completely bypasses this plugin.
+bypass-permission: "bedrockmovementfix.bypass"
+
+# Consecutive failures required inside failure-window-ms.
+failure-threshold: 3
+failure-window-ms: 1000
+
+# Minimum time between plugin corrections.
+correction-cooldown-ms: 1500
+
+# Do not correct immediately after a teleport.
+teleport-grace-ms: 1200
+
+# Do not correct immediately after join.
+join-grace-ms: 2500
+
+# Only perform a correction when the failed target is close to the
+# last server-accepted position. Large jumps are left to Paper.
+max-correction-distance: 1.75
+
+# Safety exclusions.
+ignore-dead: true
+ignore-spectator: true
+ignore-world-change: true
+
+# Which Paper 26.1.2 fail reasons may trigger the conservative correction.
+# MOVED_TOO_QUICKLY is the primary candidate for Bedrock rubber-band issues.
+handle:
+  moved-too-quickly: true
+  moved-wrongly: true
+  clipped-into-block: false
+  moved-into-unloaded-chunk: false
