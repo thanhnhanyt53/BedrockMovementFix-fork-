@@ -1,4 +1,4 @@
-# BedrockMovementFix 2.1.5
+# BedrockMovementFix 2.1.6
 # Correction requires BOTH a CLIPPED_INTO_BLOCK burst and real loss of
 # server-side positional progress. Ordinary clipped movement is ignored.
 enabled: true
