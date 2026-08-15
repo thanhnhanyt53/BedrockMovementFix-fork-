@@ -1,9 +1,9 @@
 name: BedrockMovementFix
-version: 2.1.1
+version: 2.1.2
 main: com.votri.bedrockmovementfix.BedrockMovementFixPlugin
 api-version: '1.21'
 author: VoTri
-description: Conservative Bedrock special-block movement watchdog
+description: Conservative Bedrock clipped-movement desync watchdog
 softdepend:
   - floodgate
 permissions:

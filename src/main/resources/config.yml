@@ -1,45 +1,40 @@
-# BedrockMovementFix 2.1.1
+# BedrockMovementFix 2.1.2
+# Conservative CLIPPED_INTO_BLOCK burst watchdog.
+# It NEVER calls PlayerFailMoveEvent#setAllowed(true).
 enabled: true
 debug: true
 bedrock-only: true
 bypass-permission: bedrockmovementfix.bypass
 
-# Watchdog cadence.
 watchdog-interval-ticks: 2
 
-# A fail sequence must contain this many CLIPPED_INTO_BLOCK failures
-# inside fail-move-window-ms before it can qualify.
+# Main signal: repeated collision validation failures.
 fail-move-threshold: 4
 fail-move-window-ms: 1000
 
-# Movement stall requirement.
-stall-ms: 350
-minimum-movement-delta: 0.02
+# Movement is considered "restricted" when recent movement deltas are
+# consistently small or the player has not made meaningful progress.
+movement-desync-window-ms: 700
+movement-low-delta: 0.15
+movement-samples-required: 3
 
-# Recent movement/failure activity window.
+# The player must be active/recently moving; this prevents a stationary
+# player standing in bamboo from triggering correction.
 activity-window-ms: 1200
 
-# One-shot correction cooldown.
 correction-cooldown-ms: 3000
-
-# Grace periods prevent correction immediately after lifecycle changes.
 join-grace-ms: 2500
 teleport-grace-ms: 1200
 world-change-grace-ms: 1200
 
-# Special-block proximity.
 special-block-radius: 1.75
 special-blocks:
   - BAMBOO
   - BAMBOO_SAPLING
 
-# Safest correction: resend the player's current server location/rotation.
-# Alternative: last-accepted (only when <= max-restore-distance).
+# Safest option. "last-accepted" is available but disabled by default.
 correction-mode: same-location
 max-restore-distance: 1.50
-
-# Never force PlayerFailMoveEvent#setAllowed(true).
-never-allow-failed-move: true
 
 ignore-dead: true
 ignore-spectator: true
