@@ -1,0 +1,13 @@
+name: BedrockMovementFix (fork)
+version: 2.0.0
+main: com.votri.bedrockmovementfix.BedrockMovementFixPlugin
+api-version: '1.21'
+author: ThanhNhan-thanhnhan0928
+description: Conservative Bedrock movement correction for Geyser/Floodgate on Paper
+softdepend:
+  - floodgate
+
+permissions:
+  bedrockmovementfix.bypass:
+    description: Completely bypass BedrockMovementFix
+    default: op
