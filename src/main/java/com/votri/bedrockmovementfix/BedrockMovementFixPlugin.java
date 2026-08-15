@@ -10,7 +10,13 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
-import org.bukkit.event.player.*;
+import org.bukkit.event.player.PlayerAnimationEvent;
+import org.bukkit.event.player.PlayerChangedWorldEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
@@ -18,620 +24,1893 @@ import org.bukkit.util.Vector;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.EnumSet;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-public final class BedrockMovementFixPlugin extends JavaPlugin implements Listener {
-    private final Map<UUID, State> states = new ConcurrentHashMap<>();
-    private final EnumSet<Material> specialBlocks = EnumSet.noneOf(Material.class);
+public final class BedrockMovementFixPlugin
+        extends JavaPlugin
+        implements Listener {
+
+    private final Map<UUID, State> states =
+            new ConcurrentHashMap<>();
+
+    private final EnumSet<Material> specialBlocks =
+            EnumSet.noneOf(Material.class);
+
     private BukkitTask watchdog;
 
-    private boolean enabled, debug, bedrockOnly, ignoreDead, ignoreSpectator, ignoreVehicles;
+    private boolean enabled;
+    private boolean debug;
+    private boolean bedrockOnly;
+    private boolean ignoreDead;
+    private boolean ignoreSpectator;
+    private boolean ignoreVehicles;
+
     private String bypassPermission;
-    private long intervalTicks, failThreshold, failWindowMs;
-    private long suspectWindowMs, confirmationWindowMs, progressWindowMs, correlationWindowMs;
-    private long activityWindowMs, correctionCooldownMs, joinGraceMs, teleportGraceMs, worldChangeGraceMs;
-    private int minimumProgressSamples, minimumStalledSamples, hardStallRequiredSamples;
-    private int stallingRequiredSamples, recoveryRequiredSamples;
-    private double minimumProgressDistance, hardStallZeroDistance, directionDotThreshold;
-    private double specialRadius, maxRestoreDistance;
-    private MovementDiagnosticLogger diagnosticLogger;
+
+    private long intervalTicks;
+    private long failThreshold;
+    private long failWindowMs;
+
+    private long confirmationWindowMs;
+    private long progressWindowMs;
+    private long correlationWindowMs;
+    private long activityWindowMs;
+
+    private long correctionCooldownMs;
+    private long joinGraceMs;
+    private long teleportGraceMs;
+    private long worldChangeGraceMs;
+
+    private int minimumStalledSamples;
+    private int hardStallRequiredSamples;
+    private int stallingRequiredSamples;
+    private int recoveryRequiredSamples;
+
+    private double minimumProgressDistance;
+    private double hardStallZeroDistance;
+    private double directionDotThreshold;
+
+    private double specialRadius;
+    private double maxRestoreDistance;
+
     private CorrectionMode correctionMode;
 
-    @Override public void onEnable() {
+    private MovementDiagnosticLogger diagnosticLogger;
+
+    @Override
+    public void onEnable() {
+
         saveDefaultConfig();
         loadConfig();
-        Bukkit.getPluginManager().registerEvents(this, this);
-        watchdog = Bukkit.getScheduler().runTaskTimer(this, this::watchdogTick, intervalTicks, intervalTicks);
-        getLogger().info("BedrockMovementFix 2.1.5 enabled.");
-        getLogger().info("Mode: CLIPPED burst + directional server-progress hysteresis.");
+
+        /*
+         * IMPORTANT:
+         * Logger must be initialized before any event can fire.
+         */
+        boolean logEnabled = getConfig().getBoolean(
+                "log-file-enabled",
+                true
+        );
+
+        String logFile = getConfig().getString(
+                "log-file-name",
+                "bedrock-movement-fix.log"
+        );
+
+        long maxBytes = getConfig().getLong(
+                "log-file-max-bytes",
+                2_097_152L
+        );
+
+        diagnosticLogger =
+                new MovementDiagnosticLogger(
+                        this,
+                        logEnabled,
+                        logFile,
+                        maxBytes
+                );
+
+        logDiagnostic(
+                "SYSTEM",
+                "PLUGIN_ENABLED version=2.1.7 "
+                        + "logEnabled=" + logEnabled
+                        + " logFile=" + logFile
+        );
+
+        Bukkit.getPluginManager()
+                .registerEvents(this, this);
+
+        watchdog = Bukkit.getScheduler()
+                .runTaskTimer(
+                        this,
+                        this::watchdogTick,
+                        intervalTicks,
+                        intervalTicks
+                );
+
+        getLogger().info(
+                "BedrockMovementFix 2.1.7 enabled."
+        );
+
+        getLogger().info(
+                "Bidirectional CLIPPED/STALLED correlation enabled."
+        );
     }
 
-    @Override public void onDisable() {
-        if (watchdog != null) watchdog.cancel();
+    @Override
+    public void onDisable() {
+
+        if (watchdog != null) {
+            watchdog.cancel();
+            watchdog = null;
+        }
+
+        if (diagnosticLogger != null) {
+            logDiagnostic(
+                    "SYSTEM",
+                    "PLUGIN_DISABLED"
+            );
+
+            diagnosticLogger.close();
+            diagnosticLogger = null;
+        }
+
         states.clear();
     }
 
     private void loadConfig() {
+
         reloadConfig();
-        enabled = getConfig().getBoolean("enabled", true);
-        debug = getConfig().getBoolean("debug", true);
-        bedrockOnly = getConfig().getBoolean("bedrock-only", true);
-        ignoreDead = getConfig().getBoolean("ignore-dead", true);
-        ignoreSpectator = getConfig().getBoolean("ignore-spectator", true);
-        ignoreVehicles = getConfig().getBoolean("ignore-vehicles", true);
-        bypassPermission = getConfig().getString("bypass-permission", "bedrockmovementfix.bypass");
 
-        intervalTicks = Math.max(1, getConfig().getLong("watchdog-interval-ticks", 2));
-        failThreshold = Math.max(2, getConfig().getLong("fail-move-threshold", 4));
-        failWindowMs = Math.max(100, getConfig().getLong("fail-move-window-ms", 1000));
-        suspectWindowMs = Math.max(100, getConfig().getLong("suspect-window-ms", 1000));
-        confirmationWindowMs = Math.max(100, getConfig().getLong("confirmation-window-ms", 500));
-        progressWindowMs = Math.max(100, getConfig().getLong("progress-sample-window-ms", 700));
-        correlationWindowMs = Math.max(500, getConfig().getLong("correlation-window-ms", 1500));
-        activityWindowMs = Math.max(100, getConfig().getLong("activity-window-ms", 1200));
-        correctionCooldownMs = Math.max(500, getConfig().getLong("correction-cooldown-ms", 3000));
-        joinGraceMs = Math.max(0, getConfig().getLong("join-grace-ms", 2500));
-        teleportGraceMs = Math.max(0, getConfig().getLong("teleport-grace-ms", 1200));
-        worldChangeGraceMs = Math.max(0, getConfig().getLong("world-change-grace-ms", 1200));
+        enabled = getConfig().getBoolean(
+                "enabled",
+                true
+        );
 
-        minimumProgressDistance = Math.max(0.001, getConfig().getDouble("minimum-progress-distance", 0.08));
-        minimumProgressSamples = Math.max(2, getConfig().getInt("minimum-progress-samples", 3));
-        minimumStalledSamples = Math.max(2, getConfig().getInt("minimum-stalled-samples", 3));
-        hardStallRequiredSamples = Math.max(2, getConfig().getInt("hard-stall-required-samples", 4));
-        stallingRequiredSamples = Math.max(2, getConfig().getInt("stalling-required-samples", 3));
-        recoveryRequiredSamples = Math.max(1, getConfig().getInt("recovery-required-samples", 2));
-        hardStallZeroDistance = Math.max(0.0001, getConfig().getDouble("hard-stall-zero-distance", 0.005));
-        directionDotThreshold = Math.max(-1.0, Math.min(1.0, getConfig().getDouble("direction-dot-threshold", 0.25)));
-        specialRadius = Math.max(.5, getConfig().getDouble("special-block-radius", 1.75));
-        maxRestoreDistance = Math.max(0, getConfig().getDouble("max-restore-distance", 1.5));
-        correctionMode = CorrectionMode.from(getConfig().getString("correction-mode", "same-location"));
+        debug = getConfig().getBoolean(
+                "debug",
+                true
+        );
+
+        bedrockOnly = getConfig().getBoolean(
+                "bedrock-only",
+                true
+        );
+
+        ignoreDead = getConfig().getBoolean(
+                "ignore-dead",
+                true
+        );
+
+        ignoreSpectator = getConfig().getBoolean(
+                "ignore-spectator",
+                true
+        );
+
+        ignoreVehicles = getConfig().getBoolean(
+                "ignore-vehicles",
+                true
+        );
+
+        bypassPermission = getConfig().getString(
+                "bypass-permission",
+                "bedrockmovementfix.bypass"
+        );
+
+        intervalTicks = Math.max(
+                1L,
+                getConfig().getLong(
+                        "watchdog-interval-ticks",
+                        2L
+                )
+        );
+
+        failThreshold = Math.max(
+                2L,
+                getConfig().getLong(
+                        "fail-move-threshold",
+                        3L
+                )
+        );
+
+        failWindowMs = Math.max(
+                100L,
+                getConfig().getLong(
+                        "fail-move-window-ms",
+                        1000L
+                )
+        );
+
+        confirmationWindowMs = Math.max(
+                100L,
+                getConfig().getLong(
+                        "confirmation-window-ms",
+                        500L
+                )
+        );
+
+        progressWindowMs = Math.max(
+                100L,
+                getConfig().getLong(
+                        "progress-sample-window-ms",
+                        1500L
+                )
+        );
+
+        /*
+         * Main correlation window requested for 2.1.6+.
+         */
+        correlationWindowMs = Math.max(
+                500L,
+                getConfig().getLong(
+                        "correlation-window-ms",
+                        1500L
+                )
+        );
+
+        activityWindowMs = Math.max(
+                100L,
+                getConfig().getLong(
+                        "activity-window-ms",
+                        1200L
+                )
+        );
+
+        correctionCooldownMs = Math.max(
+                500L,
+                getConfig().getLong(
+                        "correction-cooldown-ms",
+                        3000L
+                )
+        );
+
+        joinGraceMs = Math.max(
+                0L,
+                getConfig().getLong(
+                        "join-grace-ms",
+                        2500L
+                )
+        );
+
+        teleportGraceMs = Math.max(
+                0L,
+                getConfig().getLong(
+                        "teleport-grace-ms",
+                        1200L
+                )
+        );
+
+        worldChangeGraceMs = Math.max(
+                0L,
+                getConfig().getLong(
+                        "world-change-grace-ms",
+                        1200L
+                )
+        );
+
+        minimumProgressDistance =
+                Math.max(
+                        0.001D,
+                        getConfig().getDouble(
+                                "minimum-progress-distance",
+                                0.08D
+                        )
+                );
+
+        minimumStalledSamples = Math.max(
+                2,
+                getConfig().getInt(
+                        "minimum-stalled-samples",
+                        3
+                )
+        );
+
+        hardStallRequiredSamples = Math.max(
+                2,
+                getConfig().getInt(
+                        "hard-stall-required-samples",
+                        4
+                )
+        );
+
+        stallingRequiredSamples = Math.max(
+                2,
+                getConfig().getInt(
+                        "stalling-required-samples",
+                        2
+                )
+        );
+
+        recoveryRequiredSamples = Math.max(
+                1,
+                getConfig().getInt(
+                        "recovery-required-samples",
+                        2
+                )
+        );
+
+        hardStallZeroDistance =
+                Math.max(
+                        0.0001D,
+                        getConfig().getDouble(
+                                "hard-stall-zero-distance",
+                                0.005D
+                        )
+                );
+
+        directionDotThreshold =
+                Math.max(
+                        -1.0D,
+                        Math.min(
+                                1.0D,
+                                getConfig().getDouble(
+                                        "direction-dot-threshold",
+                                        0.25D
+                                )
+                        )
+                );
+
+        specialRadius =
+                Math.max(
+                        0.5D,
+                        getConfig().getDouble(
+                                "special-block-radius",
+                                1.75D
+                        )
+                );
+
+        maxRestoreDistance =
+                Math.max(
+                        0.0D,
+                        getConfig().getDouble(
+                                "max-restore-distance",
+                                1.5D
+                        )
+                );
+
+        correctionMode =
+                CorrectionMode.from(
+                        getConfig().getString(
+                                "correction-mode",
+                                "last-progress"
+                        )
+                );
 
         specialBlocks.clear();
-        for (String name : getConfig().getStringList("special-blocks")) {
-            Material material = Material.matchMaterial(name);
-            if (material != null) specialBlocks.add(material);
-            else getLogger().warning("Unknown special block: " + name);
+
+        for (String name :
+                getConfig().getStringList(
+                        "special-blocks"
+                )) {
+
+            Material material =
+                    Material.matchMaterial(name);
+
+            if (material != null) {
+                specialBlocks.add(material);
+            } else {
+                getLogger().warning(
+                        "Unknown special block: "
+                                + name
+                );
+            }
         }
     }
 
-    @EventHandler(priority=EventPriority.MONITOR)
+    @EventHandler(priority = EventPriority.MONITOR)
     public void onJoin(PlayerJoinEvent event) {
+
         Player player = event.getPlayer();
         long now = now();
+
         State state = new State();
+
         state.joinAt = now;
         state.lastMoveAt = now;
-        state.lastMeaningfulProgressAt = now;
         state.lastActivityAt = now;
-        state.lastAccepted = player.getLocation().clone();
-        states.put(player.getUniqueId(), state);
-        debug(player, "JOIN bedrock=" + isBedrock(player));
+
+        Location location =
+                player.getLocation().clone();
+
+        state.lastAccepted = location.clone();
+        state.lastProgressPosition =
+                location.clone();
+
+        state.lastAcceptedAt = now;
+        state.lastProgressAt = now;
+
+        states.put(
+                player.getUniqueId(),
+                state
+        );
+
+        logDiagnostic(
+                player,
+                "JOIN bedrock=" + isBedrock(player)
+        );
+
+        debug(
+                player,
+                "JOIN bedrock=" + isBedrock(player)
+        );
     }
 
-    @EventHandler(priority=EventPriority.MONITOR)
+    @EventHandler(priority = EventPriority.MONITOR)
     public void onQuit(PlayerQuitEvent event) {
-        states.remove(event.getPlayer().getUniqueId());
+
+        Player player = event.getPlayer();
+
+        State state =
+                states.remove(
+                        player.getUniqueId()
+                );
+
+        if (state != null) {
+            logDiagnostic(
+                    player,
+                    "QUIT phase=" + state.phase
+            );
+        }
     }
 
-    @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=true)
+    @EventHandler(
+            priority = EventPriority.MONITOR,
+            ignoreCancelled = true
+    )
     public void onMove(PlayerMoveEvent event) {
-        if (!enabled) return;
+
+        if (!enabled) {
+            return;
+        }
+
         Player player = event.getPlayer();
-        if (!tracked(player)) return;
+
+        if (!tracked(player)) {
+            return;
+        }
 
         Location to = event.getTo();
-        if (to == null || to.getWorld() == null) return;
+
+        if (to == null || to.getWorld() == null) {
+            return;
+        }
 
         State state = state(player);
         long now = now();
 
-        Location previous = state.lastAccepted;
-        double delta = 0.0;
+        Location previous =
+                state.lastAccepted;
+
+        double delta = 0.0D;
         Vector direction = null;
 
-        if (previous != null && previous.getWorld() != null
-                && previous.getWorld().equals(to.getWorld())) {
-            Vector displacement = to.toVector().subtract(previous.toVector());
+        if (previous != null
+                && previous.getWorld() != null
+                && previous.getWorld()
+                .equals(to.getWorld())) {
+
+            Vector displacement =
+                    to.toVector()
+                            .subtract(
+                                    previous.toVector()
+                            );
+
             delta = displacement.length();
-            if (delta > 1.0E-5) direction = displacement.normalize();
+
+            if (delta > 0.00001D) {
+                direction =
+                        displacement.normalize();
+            }
         }
 
+        /*
+         * Keep direction even during zero-delta movement.
+         * This is important because Bedrock may continue sending
+         * movement attempts while the server position does not advance.
+         */
         if (direction != null) {
-            state.lastDirection = direction;
+
+            state.lastDirection =
+                    direction.clone();
+
             state.lastDirectionAt = now;
         }
 
-        state.lastAccepted = to.clone();
+        state.lastAccepted =
+                to.clone();
+
         state.lastAcceptedAt = now;
         state.lastMoveAt = now;
         state.lastActivityAt = now;
 
-        state.progressSamples.addLast(new MovementSample(
-                now, delta, direction == null ? state.lastDirection : direction
-        ));
-        trimProgressSamples(state, now);
+        state.progressSamples.addLast(
+                new MovementSample(
+                        now,
+                        delta,
+                        state.lastDirection
+                )
+        );
 
+        trimProgressSamples(
+                state,
+                now
+        );
+
+        /*
+         * Only meaningful forward progress updates this timestamp.
+         */
         if (delta >= minimumProgressDistance) {
-            state.lastMeaningfulProgressAt = now;
+
+            state.lastMeaningfulProgressAt =
+                    now;
+
+            state.lastProgressAt = now;
+
+            /*
+             * This is the important correction anchor.
+             * Do NOT continuously overwrite it with every movement.
+             */
+            state.lastProgressPosition =
+                    to.clone();
         }
 
-        debug(player, "MOVE delta=" + fmt(delta) + " special=" + nearSpecial(player));
-        if (diagnosticLogger != null) diagnosticLogger.log(player.getName(), "MOVE delta=" + fmt(delta) + " special=" + nearSpecial(player));
+        boolean special =
+                nearSpecial(player);
+
+        debug(
+                player,
+                "MOVE delta="
+                        + fmt(delta)
+                        + " special="
+                        + special
+        );
+
+        logDiagnostic(
+                player,
+                "MOVE delta="
+                        + fmt(delta)
+                        + " special="
+                        + special
+                        + " phase="
+                        + state.phase
+        );
     }
 
-    @EventHandler(priority=EventPriority.MONITOR)
-    public void onTeleport(PlayerTeleportEvent event) {
-        Player player = event.getPlayer();
-        if (!tracked(player)) return;
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onTeleport(
+            PlayerTeleportEvent event
+    ) {
 
-        State state = state(player);
+        Player player =
+                event.getPlayer();
+
+        if (!tracked(player)) {
+            return;
+        }
+
+        State state =
+                state(player);
+
         long now = now();
 
         state.lastTeleportAt = now;
         state.lastActivityAt = now;
         state.lastMoveAt = now;
         state.lastMeaningfulProgressAt = now;
+        state.lastProgressAt = now;
+
         state.failures.clear();
         state.progressSamples.clear();
+
         state.phase = Phase.NORMAL;
+
         state.hardStallSince = 0L;
         state.consecutiveHardStallSamples = 0;
+        state.consecutiveStallingSamples = 0;
+        state.recoverySamples = 0;
 
         if (event.getTo() != null) {
-            state.lastAccepted = event.getTo().clone();
+
+            Location location =
+                    event.getTo().clone();
+
+            state.lastAccepted =
+                    location.clone();
+
+            state.lastProgressPosition =
+                    location.clone();
+
             state.lastAcceptedAt = now;
         }
 
-        debug(player, "TELEPORT cause=" + event.getCause());
+        logDiagnostic(
+                player,
+                "TELEPORT cause="
+                        + event.getCause()
+        );
+
+        debug(
+                player,
+                "TELEPORT cause="
+                        + event.getCause()
+        );
     }
 
-    @EventHandler(priority=EventPriority.MONITOR)
-    public void onWorldChange(PlayerChangedWorldEvent event) {
-        Player player = event.getPlayer();
-        if (!tracked(player)) return;
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onWorldChange(
+            PlayerChangedWorldEvent event
+    ) {
 
-        State state = state(player);
+        Player player =
+                event.getPlayer();
+
+        if (!tracked(player)) {
+            return;
+        }
+
+        State state =
+                state(player);
+
         long now = now();
 
         state.lastWorldChangeAt = now;
         state.lastActivityAt = now;
         state.lastMoveAt = now;
         state.lastMeaningfulProgressAt = now;
+
         state.failures.clear();
         state.progressSamples.clear();
+
         state.phase = Phase.NORMAL;
+
         state.hardStallSince = 0L;
         state.consecutiveHardStallSamples = 0;
-        state.lastAccepted = player.getLocation().clone();
+        state.consecutiveStallingSamples = 0;
+
+        Location location =
+                player.getLocation().clone();
+
+        state.lastAccepted =
+                location.clone();
+
+        state.lastProgressPosition =
+                location.clone();
+
         state.lastAcceptedAt = now;
 
-        debug(player, "WORLD_CHANGE world=" + player.getWorld().getName());
+        logDiagnostic(
+                player,
+                "WORLD_CHANGE world="
+                        + player.getWorld().getName()
+        );
     }
 
-    @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=true)
-    public void onInteract(PlayerInteractEvent event) {
-        Player player = event.getPlayer();
-        if (!tracked(player)) return;
-        State state = state(player);
+    @EventHandler(
+            priority = EventPriority.MONITOR,
+            ignoreCancelled = true
+    )
+    public void onInteract(
+            PlayerInteractEvent event
+    ) {
+
+        Player player =
+                event.getPlayer();
+
+        if (!tracked(player)) {
+            return;
+        }
+
+        State state =
+                state(player);
+
         state.lastActivityAt = now();
         state.interactions++;
-        debug(player, "INTERACT action=" + event.getAction() +
-                " block=" + (event.getClickedBlock() == null ? "none" : event.getClickedBlock().getType()));
+
+        String block =
+                event.getClickedBlock() == null
+                        ? "none"
+                        : event.getClickedBlock()
+                        .getType()
+                        .name();
+
+        logDiagnostic(
+                player,
+                "INTERACT action="
+                        + event.getAction()
+                        + " block="
+                        + block
+        );
+
+        debug(
+                player,
+                "INTERACT action="
+                        + event.getAction()
+                        + " block="
+                        + block
+        );
     }
 
-    @EventHandler(priority=EventPriority.MONITOR)
-    public void onAnimation(PlayerAnimationEvent event) {
-        Player player = event.getPlayer();
-        if (!tracked(player)) return;
-        State state = state(player);
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onAnimation(
+            PlayerAnimationEvent event
+    ) {
+
+        Player player =
+                event.getPlayer();
+
+        if (!tracked(player)) {
+            return;
+        }
+
+        State state =
+                state(player);
+
         state.lastActivityAt = now();
         state.animations++;
-        debug(player, "ANIMATION type=" + event.getAnimationType());
+
+        logDiagnostic(
+                player,
+                "ANIMATION type="
+                        + event.getAnimationType()
+        );
+
+        debug(
+                player,
+                "ANIMATION type="
+                        + event.getAnimationType()
+        );
     }
 
-    @EventHandler(priority=EventPriority.MONITOR)
-    public void onFailMove(PlayerFailMoveEvent event) {
-        if (!enabled) return;
-        Player player = event.getPlayer();
-        if (!tracked(player)) return;
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onFailMove(
+            PlayerFailMoveEvent event
+    ) {
 
-        State state = state(player);
+        if (!enabled) {
+            return;
+        }
+
+        Player player =
+                event.getPlayer();
+
+        if (!tracked(player)) {
+            return;
+        }
+
+        State state =
+                state(player);
+
         long now = now();
-        String reason = event.getFailReason().name();
+
+        String reason =
+                event.getFailReason().name();
 
         state.lastFailAt = now;
         state.lastActivityAt = now;
+
         if ("CLIPPED_INTO_BLOCK".equals(reason)) {
             state.lastClippedAt = now;
         }
-        state.failures.addLast(new Failure(now, reason));
-        trimFailures(state, now);
 
-        debug(player, "FAIL_MOVE reason=" + reason +
-                " clippedRecent=" + recentClipped(state, now));
-        if (diagnosticLogger != null) {
-            diagnosticLogger.log(player.getName(), "FAIL_MOVE reason=" + reason
-                    + " clippedRecent=" + recentClipped(state, now));
-        }
+        state.failures.addLast(
+                new Failure(
+                        now,
+                        reason
+                )
+        );
 
-        // Intentionally never call event.setAllowed(true).
+        trimFailures(
+                state,
+                now
+        );
+
+        long clipped =
+                recentClipped(
+                        state,
+                        now
+                );
+
+        debug(
+                player,
+                "FAIL_MOVE reason="
+                        + reason
+                        + " clippedRecent="
+                        + clipped
+        );
+
+        logDiagnostic(
+                player,
+                "FAIL_MOVE reason="
+                        + reason
+                        + " clippedRecent="
+                        + clipped
+                        + " phase="
+                        + state.phase
+        );
+
+        /*
+         * NEVER:
+         *
+         * event.setAllowed(true);
+         */
     }
 
     private void watchdogTick() {
-        if (!enabled) return;
+
+        if (!enabled) {
+            return;
+        }
+
         long now = now();
 
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            if (!tracked(player)) continue;
-            State state = states.get(player.getUniqueId());
-            if (state == null || !eligible(player, state, now)) continue;
+        for (Player player :
+                Bukkit.getOnlinePlayers()) {
+
+            if (!tracked(player)) {
+                continue;
+            }
+
+            State state =
+                    states.get(
+                            player.getUniqueId()
+                    );
+
+            if (state == null) {
+                continue;
+            }
+
+            if (!eligible(
+                    player,
+                    state,
+                    now
+            )) {
+                continue;
+            }
 
             if (!nearSpecial(player)) {
+
+                if (state.phase != Phase.NORMAL) {
+
+                    logState(
+                            player,
+                            state,
+                            state.phase
+                                    + " -> NORMAL "
+                                    + "reason=left-special-area"
+                    );
+                }
+
                 resetDetection(state);
                 continue;
             }
 
-            trimFailures(state, now);
-            trimProgressSamples(state, now);
+            trimFailures(
+                    state,
+                    now
+            );
 
-            long clipped = recentClipped(state, now);
-            boolean clippedSignal = state.lastClippedAt > 0
-                    && now - state.lastClippedAt <= correlationWindowMs;
-            boolean hardStall = updateHardStall(state, now);
-            boolean directionHeld = hasHeldDirection(state, now);
-            boolean tryingToMove = playerStillTryingToMove(state, now);
-            boolean recovery = updateRecovery(state, now);
-            boolean active = now - state.lastActivityAt <= activityWindowMs;
+            trimProgressSamples(
+                    state,
+                    now
+            );
 
-            // Bidirectional correlation: either signal can open suspicion.
-            boolean anySignal = clippedSignal || hardStall;
+            long clipped =
+                    recentClipped(
+                            state,
+                            now
+                    );
+
+            boolean clippedSignal =
+                    state.lastClippedAt > 0
+                            && now
+                            - state.lastClippedAt
+                            <= correlationWindowMs;
+
+            boolean hardStall =
+                    updateHardStall(
+                            state,
+                            now
+                    );
+
+            boolean directionHeld =
+                    hasHeldDirection(
+                            state,
+                            now
+                    );
+
+            boolean tryingToMove =
+                    playerStillTryingToMove(
+                            state,
+                            now
+                    );
+
+            boolean recovery =
+                    updateRecovery(
+                            state,
+                            now
+                    );
+
+            boolean active =
+                    now
+                            - state.lastActivityAt
+                            <= activityWindowMs;
+
+            boolean correlation =
+                    correlated(
+                            state,
+                            now
+                    );
+
+            /*
+             * Either side can open suspicion.
+             *
+             * CLIPPED -> SUSPECTED
+             * STALL   -> SUSPECTED
+             */
+            boolean anySignal =
+                    clippedSignal || hardStall;
 
             switch (state.phase) {
+
                 case NORMAL -> {
+
                     if (anySignal && active) {
-                        state.phase = Phase.SUSPECTED;
-                        state.suspectedAt = now;
-                        logState(player, state,
-                                "NORMAL -> SUSPECTED clipped=" + clipped
-                                        + " hardStall=" + hardStall
-                                        + " hardSince=" + state.hardStallSince);
+
+                        state.phase =
+                                Phase.SUSPECTED;
+
+                        state.suspectedAt =
+                                now;
+
+                        logState(
+                                player,
+                                state,
+                                "NORMAL -> SUSPECTED"
+                                        + " clipped="
+                                        + clipped
+                                        + " hardStall="
+                                        + hardStall
+                        );
                     }
                 }
 
                 case SUSPECTED -> {
-                    if (!active || recovery) {
+
+                    if (recovery) {
+
+                        logState(
+                                player,
+                                state,
+                                "SUSPECTED -> NORMAL "
+                                        + "reason=recovery"
+                        );
+
                         resetDetection(state);
-                        logState(player, state, "SUSPECTED -> NORMAL reason="
-                                + (recovery ? "recovery" : "inactive"));
-                    } else if (now - state.suspectedAt > correlationWindowMs) {
+
+                        continue;
+                    }
+
+                    if (!active) {
+
+                        logState(
+                                player,
+                                state,
+                                "SUSPECTED -> NORMAL "
+                                        + "reason=inactive"
+                        );
+
                         resetDetection(state);
-                        logState(player, state, "SUSPECTED -> NORMAL reason=window-expired");
-                    } else if (clippedSignal
+
+                        continue;
+                    }
+
+                    if (now
+                            - state.suspectedAt
+                            > correlationWindowMs) {
+
+                        logState(
+                                player,
+                                state,
+                                "SUSPECTED -> NORMAL "
+                                        + "reason=window-expired"
+                        );
+
+                        resetDetection(state);
+
+                        continue;
+                    }
+
+                    /*
+                     * CONFIRMATION CANDIDATE:
+                     *
+                     * 1. hard stall
+                     * 2. direction held
+                     * 3. player keeps sending movement
+                     * 4. CLIPPED exists in same correlation window
+                     */
+                    if (clippedSignal
                             && hardStall
                             && directionHeld
                             && tryingToMove
-                            && correlated(state, now)) {
-                        state.phase = Phase.STALLING;
-                        state.stallingAt = now;
-                        state.consecutiveStallingSamples = state.consecutiveHardStallSamples;
-                        logState(player, state, "SUSPECTED -> STALLING clipped=" + clipped
-                                + " hardSamples=" + state.consecutiveHardStallSamples);
+                            && correlation) {
+
+                        state.phase =
+                                Phase.STALLING;
+
+                        state.stallingAt =
+                                now;
+
+                        state.consecutiveStallingSamples =
+                                state.consecutiveHardStallSamples;
+
+                        logState(
+                                player,
+                                state,
+                                "SUSPECTED -> STALLING"
+                                        + " clipped="
+                                        + clipped
+                                        + " hardSamples="
+                                        + state.consecutiveHardStallSamples
+                        );
                     }
                 }
 
                 case STALLING -> {
-                    if (!active || recovery) {
+
+                    if (recovery) {
+
+                        logState(
+                                player,
+                                state,
+                                "STALLING -> NORMAL "
+                                        + "reason=recovery"
+                        );
+
                         resetDetection(state);
-                        logState(player, state, "STALLING -> NORMAL reason="
-                                + (recovery ? "recovery" : "inactive"));
-                    } else if (now - state.stallingAt > correlationWindowMs
-                            || !correlated(state, now)
-                            || !clippedSignal) {
+
+                        continue;
+                    }
+
+                    if (!active
+                            || !clippedSignal
+                            || !hardStall
+                            || !directionHeld
+                            || !tryingToMove
+                            || !correlation) {
+
+                        logState(
+                                player,
+                                state,
+                                "STALLING -> NORMAL "
+                                        + "reason=condition-lost"
+                        );
+
                         resetDetection(state);
-                        logState(player, state, "STALLING -> NORMAL reason=correlation-lost");
-                    } else if (hardStall && directionHeld && tryingToMove) {
-                        state.consecutiveStallingSamples++;
-                        if (state.consecutiveStallingSamples >= stallingRequiredSamples) {
-                            state.phase = Phase.CONFIRMED;
-                            state.confirmedAt = now;
-                            logState(player, state, "STALLING -> CONFIRMED hardSamples="
-                                    + state.consecutiveStallingSamples);
-                        }
+
+                        continue;
+                    }
+
+                    if (now
+                            - state.stallingAt
+                            > correlationWindowMs) {
+
+                        logState(
+                                player,
+                                state,
+                                "STALLING -> NORMAL "
+                                        + "reason=window-expired"
+                        );
+
+                        resetDetection(state);
+
+                        continue;
+                    }
+
+                    state.consecutiveStallingSamples++;
+
+                    if (state.consecutiveStallingSamples
+                            >= stallingRequiredSamples) {
+
+                        state.phase =
+                                Phase.CONFIRMED;
+
+                        state.confirmedAt =
+                                now;
+
+                        logState(
+                                player,
+                                state,
+                                "STALLING -> CONFIRMED"
+                                        + " hardSamples="
+                                        + state.consecutiveHardStallSamples
+                                        + " clipped="
+                                        + clipped
+                        );
                     }
                 }
 
                 case CONFIRMED -> {
-                    if (!active || recovery) {
+
+                    if (recovery) {
+
+                        logState(
+                                player,
+                                state,
+                                "CONFIRMED -> NORMAL "
+                                        + "reason=recovery"
+                        );
+
                         resetDetection(state);
-                        logState(player, state, "CONFIRMED -> NORMAL reason="
-                                + (recovery ? "recovery" : "inactive"));
-                    } else if (!correlated(state, now) || !clippedSignal
-                            || !hardStall || !directionHeld || !tryingToMove) {
+
+                        continue;
+                    }
+
+                    if (!active
+                            || !clippedSignal
+                            || !hardStall
+                            || !directionHeld
+                            || !tryingToMove
+                            || !correlation) {
+
+                        logState(
+                                player,
+                                state,
+                                "CONFIRMED -> NORMAL "
+                                        + "reason=condition-lost"
+                        );
+
                         resetDetection(state);
-                        logState(player, state, "CONFIRMED -> NORMAL reason=confirmation-condition-lost");
-                    } else if (now - state.confirmedAt <= correlationWindowMs
-                            && now - state.lastCorrectionAt >= correctionCooldownMs) {
-                        correctOnce(player, state, now, clipped);
+
+                        continue;
+                    }
+
+                    /*
+                     * One-shot only.
+                     */
+                    if (now
+                            - state.lastCorrectionAt
+                            >= correctionCooldownMs) {
+
+                        correctOnce(
+                                player,
+                                state,
+                                now,
+                                clipped
+                        );
                     }
                 }
             }
 
-            debug(player, "WATCH phase=" + state.phase
-                    + " clipped=" + clipped
-                    + " hardStall=" + hardStall
-                    + " hardSamples=" + state.consecutiveHardStallSamples
-                    + " hardSince=" + state.hardStallSince
-                    + " directionHeld=" + directionHeld
-                    + " trying=" + tryingToMove
-                    + " recovery=" + recovery);
+            debug(
+                    player,
+                    "WATCH phase="
+                            + state.phase
+                            + " clipped="
+                            + clipped
+                            + " hardStall="
+                            + hardStall
+                            + " hardSamples="
+                            + state.consecutiveHardStallSamples
+                            + " directionHeld="
+                            + directionHeld
+                            + " trying="
+                            + tryingToMove
+                            + " recovery="
+                            + recovery
+            );
         }
     }
 
-    private boolean updateHardStall(State state, long now) {
-        if (state.progressSamples.isEmpty() || state.lastDirection == null
-                || now - state.lastDirectionAt > correlationWindowMs) {
+    private boolean updateHardStall(
+            State state,
+            long now
+    ) {
+
+        if (state.progressSamples.isEmpty()
+                || state.lastDirection == null
+                || now
+                - state.lastDirectionAt
+                > correlationWindowMs) {
+
             state.consecutiveHardStallSamples = 0;
             state.hardStallSince = 0L;
+
             return false;
         }
 
         int consecutive = 0;
         long since = 0L;
-        for (MovementSample sample : state.progressSamples) {
-            if (now - sample.time > correlationWindowMs) continue;
 
-            if (sample.delta <= hardStallZeroDistance) {
-                if (consecutive == 0) since = sample.time;
+        /*
+         * We need the MOST RECENT consecutive zero/near-zero
+         * movement samples.
+         */
+        MovementSample[] samples =
+                state.progressSamples.toArray(
+                        new MovementSample[0]
+                );
+
+        for (int i = samples.length - 1;
+             i >= 0;
+             i--) {
+
+            MovementSample sample =
+                    samples[i];
+
+            if (now
+                    - sample.time
+                    > correlationWindowMs) {
+                break;
+            }
+
+            if (sample.delta
+                    <= hardStallZeroDistance) {
+
                 consecutive++;
+
+                since =
+                        sample.time;
+
             } else {
-                consecutive = 0;
-                since = 0L;
+                break;
             }
         }
 
-        state.consecutiveHardStallSamples = consecutive;
-        state.hardStallSince = consecutive > 0 ? since : 0L;
-        return consecutive >= hardStallRequiredSamples;
+        state.consecutiveHardStallSamples =
+                consecutive;
+
+        state.hardStallSince =
+                consecutive > 0
+                        ? since
+                        : 0L;
+
+        return consecutive
+                >= hardStallRequiredSamples;
     }
 
-    private boolean correlated(State state, long now) {
-        if (state.lastClippedAt <= 0 || state.hardStallSince <= 0) return false;
-        return Math.abs(state.lastClippedAt - state.hardStallSince) <= correlationWindowMs;
-    }
+    private boolean correlated(
+            State state,
+            long now
+    ) {
 
-    private boolean hasHeldDirection(State state, long now) {
-        return state.lastDirection != null
-                && now - state.lastDirectionAt <= correlationWindowMs;
-    }
-
-    private boolean playerStillTryingToMove(State state, long now) {
-        // Zero-delta PlayerMoveEvents still refresh lastMoveAt. This distinguishes
-        // an active client repeatedly attempting movement from an inactive player.
-        return state.lastMoveAt > 0
-                && now - state.lastMoveAt <= Math.min(activityWindowMs, correlationWindowMs)
-                && state.lastDirection != null
-                && now - state.lastDirectionAt <= correlationWindowMs;
-    }
-
-    private boolean updateRecovery(State state, long now) {
-        if (state.progressSamples.isEmpty()) {
-            state.recoverySamples = 0;
+        if (state.lastClippedAt <= 0
+                || state.hardStallSince <= 0) {
             return false;
         }
 
-        int count = 0;
-        for (MovementSample sample : state.progressSamples) {
-            if (now - sample.time > confirmationWindowMs) continue;
-            if (sample.delta >= minimumProgressDistance) count++;
-        }
+        long difference =
+                Math.abs(
+                        state.lastClippedAt
+                                - state.hardStallSince
+                );
 
-        state.recoverySamples = count;
-        return count >= recoveryRequiredSamples;
+        return difference
+                <= correlationWindowMs;
     }
 
-    private void resetDetection(State state) {
-        state.phase = Phase.NORMAL;
+    private boolean hasHeldDirection(
+            State state,
+            long now
+    ) {
+
+        return state.lastDirection != null
+                && now
+                - state.lastDirectionAt
+                <= correlationWindowMs;
+    }
+
+    private boolean playerStillTryingToMove(
+            State state,
+            long now
+    ) {
+
+        /*
+         * Zero-delta PlayerMoveEvents are still activity.
+         *
+         * This is exactly what we need for the Bedrock stall case.
+         */
+        return state.lastMoveAt > 0
+                && now
+                - state.lastMoveAt
+                <= Math.min(
+                        activityWindowMs,
+                        correlationWindowMs
+                )
+                && state.lastDirection != null
+                && now
+                - state.lastDirectionAt
+                <= correlationWindowMs;
+    }
+
+    private boolean updateRecovery(
+            State state,
+            long now
+    ) {
+
+        int count = 0;
+
+        for (MovementSample sample :
+                state.progressSamples) {
+
+            if (now
+                    - sample.time
+                    > confirmationWindowMs) {
+                continue;
+            }
+
+            if (sample.delta
+                    >= minimumProgressDistance) {
+
+                count++;
+            }
+        }
+
+        state.recoverySamples =
+                count;
+
+        return count
+                >= recoveryRequiredSamples;
+    }
+
+    private void resetDetection(
+            State state
+    ) {
+
+        state.phase =
+                Phase.NORMAL;
+
         state.suspectedAt = 0L;
         state.stallingAt = 0L;
         state.confirmedAt = 0L;
+
         state.hardStallSince = 0L;
+
         state.consecutiveHardStallSamples = 0;
         state.consecutiveStallingSamples = 0;
         state.recoverySamples = 0;
     }
 
-    private void logState(Player player, State state, String message) {
-        if (diagnosticLogger != null) {
-            diagnosticLogger.log(player.getName(), "STATE " + message);
-        }
-    }
+    private void correctOnce(
+            Player player,
+            State state,
+            long now,
+            long clipped
+    ) {
 
-    private boolean hasDirectionalPositionStall(State state, long now) {
-        trimProgressSamples(state, now);
+        Location current =
+                player.getLocation();
 
-        if (state.lastDirection == null) return false;
-        if (now - state.lastDirectionAt > progressWindowMs) return false;
-        if (now - state.lastMeaningfulProgressAt < confirmationWindowMs) return false;
-        if (state.progressSamples.size() < minimumStalledSamples) return false;
-
-        int stalled = 0;
-        int progress = 0;
-
-        for (MovementSample sample : state.progressSamples) {
-            if (sample.direction == null) continue;
-
-            /*
-             * Directional progress is measured against the recent movement
-             * direction, not against an arbitrary low-delta threshold.
-             * A sample is stalled if it barely advances in that direction.
-             */
-            double directional = sample.delta * Math.max(0.0, sample.direction.dot(state.lastDirection));
-
-            if (directional >= minimumProgressDistance) progress++;
-            else stalled++;
-        }
+        Location target =
+                current.clone();
 
         /*
-         * We require a sustained lack of meaningful forward progress.
-         * A normal acceleration/deceleration sequence can contain several
-         * small samples without being classified as a stall.
+         * Use the LAST MEANINGFUL PROGRESS position,
+         * not lastAccepted.
+         *
+         * lastAccepted is updated every PlayerMoveEvent,
+         * including zero-progress movement.
          */
-        return stalled >= minimumStalledSamples && progress == 0;
-    }
+        if (correctionMode
+                == CorrectionMode.LAST_PROGRESS
+                && state.lastProgressPosition != null
+                && state.lastProgressPosition.getWorld() != null
+                && state.lastProgressPosition
+                .getWorld()
+                .equals(current.getWorld())
+                && current.distance(
+                        state.lastProgressPosition
+                ) <= maxRestoreDistance) {
 
-    private void correctOnce(Player player, State state, long now, long clipped) {
-        Location current = player.getLocation();
-        Location target = current.clone();
+            target =
+                    state.lastProgressPosition
+                            .clone();
 
-        if (correctionMode == CorrectionMode.LAST_ACCEPTED
-                && state.lastAccepted != null
-                && state.lastAccepted.getWorld() != null
-                && state.lastAccepted.getWorld().equals(current.getWorld())
-                && current.distance(state.lastAccepted) <= maxRestoreDistance) {
-            target = state.lastAccepted.clone();
-            target.setYaw(current.getYaw());
-            target.setPitch(current.getPitch());
+            target.setYaw(
+                    current.getYaw()
+            );
+
+            target.setPitch(
+                    current.getPitch()
+            );
         }
 
-        final Location correctionTarget = target.clone();
-        final long correctionId = ++state.correctionId;
+        final Location correctionTarget =
+                target.clone();
 
-        state.lastCorrectionAt = now;
-        state.phase = Phase.NORMAL;
+        final long correctionId =
+                ++state.correctionId;
 
-        debug(player, "CORRECTION_ARMED id=" + correctionId +
-                " clipped=" + clipped +
-                " mode=" + correctionMode +
-                " target=" + loc(correctionTarget));
-        if (diagnosticLogger != null) {
-            diagnosticLogger.log(player.getName(), "CORRECTION_ARMED id=" + correctionId
-                    + " clipped=" + clipped + " mode=" + correctionMode
-                    + " target=" + loc(correctionTarget));
+        state.lastCorrectionAt =
+                now;
+
+        /*
+         * Consume confirmation immediately.
+         * This prevents multiple corrections.
+         */
+        state.phase =
+                Phase.NORMAL;
+
+        logState(
+                player,
+                state,
+                "CONFIRMED -> NORMAL "
+                        + "reason=correction-armed"
+                        + " id="
+                        + correctionId
+        );
+
+        logDiagnostic(
+                player,
+                "CORRECTION_ARMED"
+                        + " id="
+                        + correctionId
+                        + " clipped="
+                        + clipped
+                        + " mode="
+                        + correctionMode
+                        + " target="
+                        + loc(correctionTarget)
+        );
+
+        debug(
+                player,
+                "CORRECTION_ARMED id="
+                        + correctionId
+                        + " target="
+                        + loc(correctionTarget)
+        );
+
+        Bukkit.getScheduler().runTask(
+                this,
+                () -> {
+
+                    if (!player.isOnline()
+                            || !tracked(player)) {
+
+                        logDiagnostic(
+                                player,
+                                "CORRECTION_CANCELLED"
+                                        + " id="
+                                        + correctionId
+                                        + " reason=offline"
+                        );
+
+                        return;
+                    }
+
+                    /*
+                     * EXACTLY ONE teleport.
+                     *
+                     * Never schedule repeating corrections.
+                     */
+                    player.teleport(
+                            correctionTarget,
+                            PlayerTeleportEvent.TeleportCause.PLUGIN
+                    );
+
+                    long time =
+                            now();
+
+                    state.lastTeleportAt =
+                            time;
+
+                    state.lastAccepted =
+                            correctionTarget.clone();
+
+                    state.lastProgressPosition =
+                            correctionTarget.clone();
+
+                    state.lastAcceptedAt =
+                            time;
+
+                    state.lastMoveAt =
+                            time;
+
+                    state.lastMeaningfulProgressAt =
+                            time;
+
+                    state.lastProgressAt =
+                            time;
+
+                    state.lastActivityAt =
+                            time;
+
+                    state.failures.clear();
+                    state.progressSamples.clear();
+
+                    state.hardStallSince =
+                            0L;
+
+                    state.consecutiveHardStallSamples =
+                            0;
+
+                    state.consecutiveStallingSamples =
+                            0;
+
+                    logDiagnostic(
+                            player,
+                            "CORRECTION_SENT"
+                                    + " id="
+                                    + correctionId
+                                    + " target="
+                                    + loc(correctionTarget)
+                    );
+
+                    debug(
+                            player,
+                            "CORRECTION_SENT id="
+                                    + correctionId
+                                    + " target="
+                                    + loc(correctionTarget)
+                    );
+                }
+        );
+    }
+
+    private boolean eligible(
+            Player player,
+            State state,
+            long now
+    ) {
+
+        if (bypassPermission != null
+                && !bypassPermission.isBlank()
+                && player.hasPermission(
+                        bypassPermission
+                )) {
+
+            return false;
         }
 
-        Bukkit.getScheduler().runTask(this, () -> {
-            if (!player.isOnline() || !tracked(player)) return;
+        if (ignoreDead
+                && player.isDead()) {
+            return false;
+        }
 
-            // Exactly one correction. Never schedule a repeating teleport.
-            player.teleport(correctionTarget, PlayerTeleportEvent.TeleportCause.PLUGIN);
+        if (ignoreSpectator
+                && player.getGameMode()
+                == GameMode.SPECTATOR) {
+            return false;
+        }
 
-            long time = now();
-            state.lastTeleportAt = time;
-            state.lastAccepted = correctionTarget.clone();
-            state.lastAcceptedAt = time;
-            state.lastMoveAt = time;
-            state.lastMeaningfulProgressAt = time;
-            state.lastActivityAt = 0L;
-            state.failures.clear();
-            state.progressSamples.clear();
-            state.phase = Phase.NORMAL;
+        if (ignoreVehicles
+                && player.isInsideVehicle()) {
+            return false;
+        }
 
-            debug(player, "CORRECTION_SENT id=" + correctionId +
-                    " target=" + loc(correctionTarget));
-            if (diagnosticLogger != null) {
-                diagnosticLogger.log(player.getName(), "CORRECTION_SENT id=" + correctionId
-                        + " target=" + loc(correctionTarget));
-            }
-        });
+        return now
+                - state.joinAt
+                >= joinGraceMs
+
+                && now
+                - state.lastTeleportAt
+                >= teleportGraceMs
+
+                && now
+                - state.lastWorldChangeAt
+                >= worldChangeGraceMs;
     }
 
-    private boolean eligible(Player player, State state, long now) {
-        if (bypassPermission != null && !bypassPermission.isBlank()
-                && player.hasPermission(bypassPermission)) return false;
-        if (ignoreDead && player.isDead()) return false;
-        if (ignoreSpectator && player.getGameMode() == GameMode.SPECTATOR) return false;
-        if (ignoreVehicles && player.isInsideVehicle()) return false;
+    private boolean tracked(
+            Player player
+    ) {
 
-        return now - state.joinAt >= joinGraceMs
-                && now - state.lastTeleportAt >= teleportGraceMs
-                && now - state.lastWorldChangeAt >= worldChangeGraceMs;
+        return player.isOnline()
+                && (
+                !bedrockOnly
+                        || isBedrock(player)
+        );
     }
 
-    private boolean tracked(Player player) {
-        return player.isOnline() && (!bedrockOnly || isBedrock(player));
+    private State state(
+            Player player
+    ) {
+
+        return states.computeIfAbsent(
+                player.getUniqueId(),
+                ignored -> {
+
+                    State state =
+                            new State();
+
+                    long now = now();
+
+                    state.joinAt =
+                            now;
+
+                    state.lastMoveAt =
+                            now;
+
+                    state.lastActivityAt =
+                            now;
+
+                    Location location =
+                            player.getLocation()
+                                    .clone();
+
+                    state.lastAccepted =
+                            location.clone();
+
+                    state.lastProgressPosition =
+                            location.clone();
+
+                    state.lastAcceptedAt =
+                            now;
+
+                    state.lastProgressAt =
+                            now;
+
+                    return state;
+                }
+        );
     }
 
-    private State state(Player player) {
-        return states.computeIfAbsent(player.getUniqueId(), ignored -> new State());
-    }
+    private boolean nearSpecial(
+            Player player
+    ) {
 
-    private boolean nearSpecial(Player player) {
-        Location location = player.getLocation();
-        double radiusSquared = specialRadius * specialRadius;
+        Location location =
+                player.getLocation();
 
-        for (int x = location.getBlockX() - 2; x <= location.getBlockX() + 2; x++) {
-            for (int y = location.getBlockY() - 2; y <= location.getBlockY() + 2; y++) {
-                for (int z = location.getBlockZ() - 2; z <= location.getBlockZ() + 2; z++) {
-                    Block block = location.getWorld().getBlockAt(x, y, z);
-                    if (!specialBlocks.contains(block.getType())) continue;
+        double radiusSquared =
+                specialRadius
+                        * specialRadius;
 
-                    double dx = location.getX() - (x + .5);
-                    double dy = location.getY() - (y + .5);
-                    double dz = location.getZ() - (z + .5);
+        int centerX =
+                location.getBlockX();
 
-                    if (dx * dx + dy * dy + dz * dz <= radiusSquared) return true;
+        int centerY =
+                location.getBlockY();
+
+        int centerZ =
+                location.getBlockZ();
+
+        int range = 2;
+
+        for (int x =
+             centerX - range;
+             x <= centerX + range;
+             x++) {
+
+            for (int y =
+                 centerY - range;
+                 y <= centerY + range;
+                 y++) {
+
+                for (int z =
+                     centerZ - range;
+                     z <= centerZ + range;
+                     z++) {
+
+                    Block block =
+                            location.getWorld()
+                                    .getBlockAt(
+                                            x,
+                                            y,
+                                            z
+                                    );
+
+                    if (!specialBlocks.contains(
+                            block.getType()
+                    )) {
+                        continue;
+                    }
+
+                    double dx =
+                            location.getX()
+                                    - (x + 0.5D);
+
+                    double dy =
+                            location.getY()
+                                    - (y + 0.5D);
+
+                    double dz =
+                            location.getZ()
+                                    - (z + 0.5D);
+
+                    if (dx * dx
+                            + dy * dy
+                            + dz * dz
+                            <= radiusSquared) {
+
+                        return true;
+                    }
                 }
             }
         }
+
         return false;
     }
 
-    private long recentClipped(State state, long now) {
+    private long recentClipped(
+            State state,
+            long now
+    ) {
+
         long count = 0;
-        for (Failure failure : state.failures) {
-            if (now - failure.time <= failWindowMs
-                    && "CLIPPED_INTO_BLOCK".equals(failure.reason)) {
+
+        for (Failure failure :
+                state.failures) {
+
+            if (now
+                    - failure.time
+                    <= failWindowMs
+                    && "CLIPPED_INTO_BLOCK"
+                    .equals(
+                            failure.reason
+                    )) {
+
                 count++;
             }
         }
+
         return count;
     }
 
-    private void trimFailures(State state, long now) {
+    private void trimFailures(
+            State state,
+            long now
+    ) {
+
         while (!state.failures.isEmpty()
-                && now - state.failures.peekFirst().time > failWindowMs) {
+                && now
+                - state.failures.peekFirst().time
+                > failWindowMs) {
+
             state.failures.removeFirst();
         }
     }
 
-    private void trimProgressSamples(State state, long now) {
+    private void trimProgressSamples(
+            State state,
+            long now
+    ) {
+
         while (!state.progressSamples.isEmpty()
-                && now - state.progressSamples.peekFirst().time > progressWindowMs) {
+                && now
+                - state.progressSamples.peekFirst().time
+                > progressWindowMs) {
+
             state.progressSamples.removeFirst();
         }
     }
 
-    private boolean isBedrock(Player player) {
+    private boolean isBedrock(
+            Player player
+    ) {
+
         try {
-            Class<?> apiClass = Class.forName("org.geysermc.floodgate.api.FloodgateApi");
-            Object api = apiClass.getMethod("getInstance").invoke(null);
-            Object result = apiClass.getMethod("isFloodgatePlayer", UUID.class)
-                    .invoke(api, player.getUniqueId());
-            return result instanceof Boolean && (Boolean) result;
-        } catch (ReflectiveOperationException | LinkageError ignored) {
+
+            Class<?> apiClass =
+                    Class.forName(
+                            "org.geysermc.floodgate.api.FloodgateApi"
+                    );
+
+            Object api =
+                    apiClass
+                            .getMethod(
+                                    "getInstance"
+                            )
+                            .invoke(null);
+
+            Object result =
+                    apiClass
+                            .getMethod(
+                                    "isFloodgatePlayer",
+                                    UUID.class
+                            )
+                            .invoke(
+                                    api,
+                                    player.getUniqueId()
+                            );
+
+            return result instanceof Boolean
+                    && (Boolean) result;
+
+        } catch (
+                ReflectiveOperationException
+                        | LinkageError ignored
+        ) {
+
             return false;
         }
     }
 
-    private void debug(Player player, String message) {
-        if (debug) getLogger().info("[DEBUG] " + player.getName() + ": " + message);
-    
-        if (diagnosticLogger != null) {
-            diagnosticLogger.log(player.getName(), "DEBUG " + message);
+    private void debug(
+            Player player,
+            String message
+    ) {
+
+        if (!debug) {
+            return;
         }
+
+        getLogger().info(
+                "[DEBUG] "
+                        + player.getName()
+                        + ": "
+                        + message
+        );
+
+        /*
+         * Debug is also persisted.
+         */
+        logDiagnostic(
+                player,
+                "DEBUG " + message
+        );
     }
 
-    private static String fmt(double value) {
-        return String.format(java.util.Locale.ROOT, "%.3f", value);
+    private void logState(
+            Player player,
+            State state,
+            String message
+    ) {
+
+        logDiagnostic(
+                player,
+                "STATE "
+                        + message
+        );
     }
 
-    private static String loc(Location location) {
-        return String.format(java.util.Locale.ROOT,
+    private void logDiagnostic(
+            Player player,
+            String message
+    ) {
+
+        if (diagnosticLogger == null) {
+            return;
+        }
+
+        diagnosticLogger.log(
+                player.getName(),
+                message
+        );
+    }
+
+    private void logDiagnostic(
+            String player,
+            String message
+    ) {
+
+        if (diagnosticLogger == null) {
+            return;
+        }
+
+        diagnosticLogger.log(
+                player,
+                message
+        );
+    }
+
+    private static String fmt(
+            double value
+    ) {
+
+        return String.format(
+                Locale.ROOT,
+                "%.3f",
+                value
+        );
+    }
+
+    private static String loc(
+            Location location
+    ) {
+
+        return String.format(
+                Locale.ROOT,
                 "%.3f,%.3f,%.3f yaw=%.1f pitch=%.1f",
-                location.getX(), location.getY(), location.getZ(),
-                location.getYaw(), location.getPitch());
+                location.getX(),
+                location.getY(),
+                location.getZ(),
+                location.getYaw(),
+                location.getPitch()
+        );
     }
 
     private static long now() {
@@ -639,52 +1918,112 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
     }
 
     private enum Phase {
-        NORMAL, SUSPECTED, STALLING, CONFIRMED
+        NORMAL,
+        SUSPECTED,
+        STALLING,
+        CONFIRMED
     }
 
     private enum CorrectionMode {
-        SAME_LOCATION, LAST_ACCEPTED;
 
-        static CorrectionMode from(String value) {
-            return "last-accepted".equalsIgnoreCase(value)
-                    ? LAST_ACCEPTED : SAME_LOCATION;
+        SAME_LOCATION,
+        LAST_PROGRESS;
+
+        static CorrectionMode from(
+                String value
+        ) {
+
+            if ("last-progress"
+                    .equalsIgnoreCase(value)) {
+
+                return LAST_PROGRESS;
+            }
+
+            return SAME_LOCATION;
         }
     }
 
     private static final class Failure {
+
         final long time;
         final String reason;
 
-        Failure(long time, String reason) {
+        Failure(
+                long time,
+                String reason
+        ) {
+
             this.time = time;
             this.reason = reason;
         }
     }
 
     private static final class MovementSample {
+
         final long time;
         final double delta;
         final Vector direction;
 
-        MovementSample(long time, double delta, Vector direction) {
+        MovementSample(
+                long time,
+                double delta,
+                Vector direction
+        ) {
+
             this.time = time;
             this.delta = delta;
-            this.direction = direction == null ? null : direction.clone();
+
+            this.direction =
+                    direction == null
+                            ? null
+                            : direction.clone();
         }
     }
 
     private static final class State {
-        long joinAt, lastMoveAt, lastAcceptedAt, lastMeaningfulProgressAt;
-        long lastActivityAt, lastTeleportAt, lastWorldChangeAt, lastFailAt, lastCorrectionAt;
-        long lastDirectionAt, suspectedAt, stallingAt, confirmedAt, lastClippedAt, hardStallSince;
-        int consecutiveHardStallSamples, consecutiveStallingSamples, recoverySamples;
-        long interactions, animations, correctionId;
+
+        long joinAt;
+        long lastMoveAt;
+
+        long lastAcceptedAt;
+        long lastMeaningfulProgressAt;
+        long lastProgressAt;
+
+        long lastActivityAt;
+        long lastTeleportAt;
+        long lastWorldChangeAt;
+        long lastFailAt;
+        long lastCorrectionAt;
+
+        long lastDirectionAt;
+
+        long suspectedAt;
+        long stallingAt;
+        long confirmedAt;
+
+        long lastClippedAt;
+        long hardStallSince;
+
+        int consecutiveHardStallSamples;
+        int consecutiveStallingSamples;
+        int recoverySamples;
+
+        long interactions;
+        long animations;
+        long correctionId;
 
         Location lastAccepted;
-        Vector lastDirection;
-        Phase phase = Phase.NORMAL;
+        Location lastProgressPosition;
 
-        final Deque<Failure> failures = new ArrayDeque<>();
-        final Deque<MovementSample> progressSamples = new ArrayDeque<>();
+        Vector lastDirection;
+
+        Phase phase =
+                Phase.NORMAL;
+
+        final Deque<Failure> failures =
+                new ArrayDeque<>();
+
+        final Deque<MovementSample> progressSamples =
+                new ArrayDeque<>();
     }
 }
