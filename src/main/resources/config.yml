@@ -1,6 +1,6 @@
-# BedrockMovementFix 2.1.2
-# Conservative CLIPPED_INTO_BLOCK burst watchdog.
-# It NEVER calls PlayerFailMoveEvent#setAllowed(true).
+# BedrockMovementFix 2.1.3
+# Correction requires BOTH a CLIPPED_INTO_BLOCK burst and real loss of
+# server-side positional progress. Ordinary clipped movement is ignored.
 enabled: true
 debug: true
 bedrock-only: true
@@ -8,18 +8,26 @@ bypass-permission: bedrockmovementfix.bypass
 
 watchdog-interval-ticks: 2
 
-# Main signal: repeated collision validation failures.
+# Collision-failure signal.
 fail-move-threshold: 4
 fail-move-window-ms: 1000
 
-# Movement is considered "restricted" when recent movement deltas are
-# consistently small or the player has not made meaningful progress.
-movement-desync-window-ms: 700
-movement-low-delta: 0.15
-movement-samples-required: 3
+# Hysteresis:
+# SUSPECTED is entered when the two signals begin to overlap.
+# CONFIRMED requires sustained loss of positional progress.
+suspect-window-ms: 1000
+confirmation-window-ms: 500
 
-# The player must be active/recently moving; this prevents a stationary
-# player standing in bamboo from triggering correction.
+# Progress test.
+# A sample counts as progress when server position advances by at least
+# this distance in the player's recent movement direction.
+minimum-progress-distance: 0.08
+minimum-progress-samples: 3
+progress-sample-window-ms: 700
+minimum-stalled-samples: 3
+
+# Player must have recent movement/activity; standing still is never a reason
+# for correction.
 activity-window-ms: 1200
 
 correction-cooldown-ms: 3000
@@ -32,7 +40,8 @@ special-blocks:
   - BAMBOO
   - BAMBOO_SAPLING
 
-# Safest option. "last-accepted" is available but disabled by default.
+# SAME_LOCATION is deliberately the safest default.
+# LAST_ACCEPTED is available but disabled by default.
 correction-mode: same-location
 max-restore-distance: 1.50
 
