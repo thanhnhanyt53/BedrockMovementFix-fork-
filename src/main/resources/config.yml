@@ -1,4 +1,4 @@
-# BedrockMovementFix 2.1.4
+# BedrockMovementFix 2.1.5
 # Correction requires BOTH a CLIPPED_INTO_BLOCK burst and real loss of
 # server-side positional progress. Ordinary clipped movement is ignored.
 enabled: true
@@ -30,7 +30,13 @@ minimum-stalled-samples: 3
 # A hard stall is consecutive zero-distance server movement samples.
 correlation-window-ms: 1500
 hard-stall-zero-distance: 0.005
-hard-stall-required-samples: 3
+hard-stall-required-samples: 4
+stalling-required-samples: 3
+direction-dot-threshold: 0.25
+recovery-required-samples: 2
+log-file-enabled: true
+log-file-name: bedrock-movement-fix.log
+log-file-max-bytes: 2097152
 
 # Player must have recent movement/activity; standing still is never a reason
 # for correction.
