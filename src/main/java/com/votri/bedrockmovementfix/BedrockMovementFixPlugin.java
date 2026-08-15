@@ -5,6 +5,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -19,7 +20,9 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
+import org.bukkit.util.BoundingBox;
 import org.bukkit.util.Vector;
+import org.bukkit.block.data.BlockData;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -51,9 +54,7 @@ public final class BedrockMovementFixPlugin
     private String bypassPermission;
 
     private long intervalTicks;
-    private long failThreshold;
     private long failWindowMs;
-
     private long confirmationWindowMs;
     private long progressWindowMs;
     private long correlationWindowMs;
@@ -64,7 +65,6 @@ public final class BedrockMovementFixPlugin
     private long teleportGraceMs;
     private long worldChangeGraceMs;
 
-    private int minimumStalledSamples;
     private int hardStallRequiredSamples;
     private int stallingRequiredSamples;
     private int recoveryRequiredSamples;
@@ -86,24 +86,23 @@ public final class BedrockMovementFixPlugin
         saveDefaultConfig();
         loadConfig();
 
-        /*
-         * IMPORTANT:
-         * Logger must be initialized before any event can fire.
-         */
-        boolean logEnabled = getConfig().getBoolean(
-                "log-file-enabled",
-                true
-        );
+        boolean logEnabled =
+                getConfig().getBoolean(
+                        "log-file-enabled",
+                        true
+                );
 
-        String logFile = getConfig().getString(
-                "log-file-name",
-                "bedrock-movement-fix.log"
-        );
+        String logFile =
+                getConfig().getString(
+                        "log-file-name",
+                        "bedrock-movement-fix.log"
+                );
 
-        long maxBytes = getConfig().getLong(
-                "log-file-max-bytes",
-                2_097_152L
-        );
+        long maxBytes =
+                getConfig().getLong(
+                        "log-file-max-bytes",
+                        2_097_152L
+                );
 
         diagnosticLogger =
                 new MovementDiagnosticLogger(
@@ -115,16 +114,17 @@ public final class BedrockMovementFixPlugin
 
         logDiagnostic(
                 "SYSTEM",
-                "PLUGIN_ENABLED version=2.1.7 "
-                        + "logEnabled=" + logEnabled
-                        + " logFile=" + logFile
+                "PLUGIN_ENABLED version=2.1.8 "
+                        + "movement-bypass=false "
+                        + "setAllowed=false "
+                        + "special-safe-pass=REMOVED"
         );
 
         Bukkit.getPluginManager()
                 .registerEvents(this, this);
 
-        watchdog = Bukkit.getScheduler()
-                .runTaskTimer(
+        watchdog =
+                Bukkit.getScheduler().runTaskTimer(
                         this,
                         this::watchdogTick,
                         intervalTicks,
@@ -132,11 +132,15 @@ public final class BedrockMovementFixPlugin
                 );
 
         getLogger().info(
-                "BedrockMovementFix 2.1.7 enabled."
+                "BedrockMovementFix 2.1.8 enabled."
         );
 
         getLogger().info(
-                "Bidirectional CLIPPED/STALLED correlation enabled."
+                "Movement bypass disabled."
+        );
+
+        getLogger().info(
+                "CLIPPED/STALLED correlation enabled."
         );
     }
 
@@ -149,6 +153,7 @@ public final class BedrockMovementFixPlugin
         }
 
         if (diagnosticLogger != null) {
+
             logDiagnostic(
                     "SYSTEM",
                     "PLUGIN_DISABLED"
@@ -165,131 +170,137 @@ public final class BedrockMovementFixPlugin
 
         reloadConfig();
 
-        enabled = getConfig().getBoolean(
-                "enabled",
-                true
-        );
+        enabled =
+                getConfig().getBoolean(
+                        "enabled",
+                        true
+                );
 
-        debug = getConfig().getBoolean(
-                "debug",
-                true
-        );
+        debug =
+                getConfig().getBoolean(
+                        "debug",
+                        true
+                );
 
-        bedrockOnly = getConfig().getBoolean(
-                "bedrock-only",
-                true
-        );
+        bedrockOnly =
+                getConfig().getBoolean(
+                        "bedrock-only",
+                        true
+                );
 
-        ignoreDead = getConfig().getBoolean(
-                "ignore-dead",
-                true
-        );
+        ignoreDead =
+                getConfig().getBoolean(
+                        "ignore-dead",
+                        true
+                );
 
-        ignoreSpectator = getConfig().getBoolean(
-                "ignore-spectator",
-                true
-        );
+        ignoreSpectator =
+                getConfig().getBoolean(
+                        "ignore-spectator",
+                        true
+                );
 
-        ignoreVehicles = getConfig().getBoolean(
-                "ignore-vehicles",
-                true
-        );
+        ignoreVehicles =
+                getConfig().getBoolean(
+                        "ignore-vehicles",
+                        true
+                );
 
-        bypassPermission = getConfig().getString(
-                "bypass-permission",
-                "bedrockmovementfix.bypass"
-        );
+        bypassPermission =
+                getConfig().getString(
+                        "bypass-permission",
+                        "bedrockmovementfix.bypass"
+                );
 
-        intervalTicks = Math.max(
-                1L,
-                getConfig().getLong(
-                        "watchdog-interval-ticks",
-                        2L
-                )
-        );
+        intervalTicks =
+                Math.max(
+                        1L,
+                        getConfig().getLong(
+                                "watchdog-interval-ticks",
+                                2L
+                        )
+                );
 
-        failThreshold = Math.max(
-                2L,
-                getConfig().getLong(
-                        "fail-move-threshold",
-                        3L
-                )
-        );
+        failWindowMs =
+                Math.max(
+                        100L,
+                        getConfig().getLong(
+                                "fail-move-window-ms",
+                                1000L
+                        )
+                );
 
-        failWindowMs = Math.max(
-                100L,
-                getConfig().getLong(
-                        "fail-move-window-ms",
-                        1000L
-                )
-        );
+        confirmationWindowMs =
+                Math.max(
+                        100L,
+                        getConfig().getLong(
+                                "confirmation-window-ms",
+                                500L
+                        )
+                );
 
-        confirmationWindowMs = Math.max(
-                100L,
-                getConfig().getLong(
-                        "confirmation-window-ms",
-                        500L
-                )
-        );
+        progressWindowMs =
+                Math.max(
+                        100L,
+                        getConfig().getLong(
+                                "progress-sample-window-ms",
+                                1500L
+                        )
+                );
 
-        progressWindowMs = Math.max(
-                100L,
-                getConfig().getLong(
-                        "progress-sample-window-ms",
-                        1500L
-                )
-        );
+        correlationWindowMs =
+                Math.max(
+                        500L,
+                        getConfig().getLong(
+                                "correlation-window-ms",
+                                1500L
+                        )
+                );
 
-        /*
-         * Main correlation window requested for 2.1.6+.
-         */
-        correlationWindowMs = Math.max(
-                500L,
-                getConfig().getLong(
-                        "correlation-window-ms",
-                        1500L
-                )
-        );
+        activityWindowMs =
+                Math.max(
+                        100L,
+                        getConfig().getLong(
+                                "activity-window-ms",
+                                1200L
+                        )
+                );
 
-        activityWindowMs = Math.max(
-                100L,
-                getConfig().getLong(
-                        "activity-window-ms",
-                        1200L
-                )
-        );
+        correctionCooldownMs =
+                Math.max(
+                        500L,
+                        getConfig().getLong(
+                                "correction-cooldown-ms",
+                                3000L
+                        )
+                );
 
-        correctionCooldownMs = Math.max(
-                500L,
-                getConfig().getLong(
-                        "correction-cooldown-ms",
-                        3000L
-                )
-        );
+        joinGraceMs =
+                Math.max(
+                        0L,
+                        getConfig().getLong(
+                                "join-grace-ms",
+                                2500L
+                        )
+                );
 
-        joinGraceMs = Math.max(
-                0L,
-                getConfig().getLong(
-                        "join-grace-ms",
-                        2500L
-                )
-        );
+        teleportGraceMs =
+                Math.max(
+                        0L,
+                        getConfig().getLong(
+                                "teleport-grace-ms",
+                                1200L
+                        )
+                );
 
-        teleportGraceMs = Math.max(
-                0L,
-                getConfig().getLong(
-                        "teleport-grace-ms",
-                        1200L
-                )
-        );
-
-        worldChangeGraceMs = Math.max(
-                0L,
-                getConfig().getLong(
-                        "world-change-grace-ms",
-                        1200L
-                )
-        );
+        worldChangeGraceMs =
+                Math.max(
+                        0L,
+                        getConfig().getLong(
+                                "world-change-grace-ms",
+                                1200L
+                        )
+                );
 
         minimumProgressDistance =
                 Math.max(
@@ -300,37 +311,32 @@ public final class BedrockMovementFixPlugin
                         )
                 );
 
-        minimumStalledSamples = Math.max(
-                2,
-                getConfig().getInt(
-                        "minimum-stalled-samples",
-                        3
-                )
-        );
+        hardStallRequiredSamples =
+                Math.max(
+                        2,
+                        getConfig().getInt(
+                                "hard-stall-required-samples",
+                                4
+                        )
+                );
 
-        hardStallRequiredSamples = Math.max(
-                2,
-                getConfig().getInt(
-                        "hard-stall-required-samples",
-                        4
-                )
-        );
+        stallingRequiredSamples =
+                Math.max(
+                        2,
+                        getConfig().getInt(
+                                "stalling-required-samples",
+                                2
+                        )
+                );
 
-        stallingRequiredSamples = Math.max(
-                2,
-                getConfig().getInt(
-                        "stalling-required-samples",
-                        2
-                )
-        );
-
-        recoveryRequiredSamples = Math.max(
-                1,
-                getConfig().getInt(
-                        "recovery-required-samples",
-                        2
-                )
-        );
+        recoveryRequiredSamples =
+                Math.max(
+                        1,
+                        getConfig().getInt(
+                                "recovery-required-samples",
+                                2
+                        )
+                );
 
         hardStallZeroDistance =
                 Math.max(
@@ -390,8 +396,11 @@ public final class BedrockMovementFixPlugin
                     Material.matchMaterial(name);
 
             if (material != null) {
+
                 specialBlocks.add(material);
+
             } else {
+
                 getLogger().warning(
                         "Unknown special block: "
                                 + name
@@ -404,6 +413,7 @@ public final class BedrockMovementFixPlugin
     public void onJoin(PlayerJoinEvent event) {
 
         Player player = event.getPlayer();
+
         long now = now();
 
         State state = new State();
@@ -415,12 +425,15 @@ public final class BedrockMovementFixPlugin
         Location location =
                 player.getLocation().clone();
 
-        state.lastAccepted = location.clone();
+        state.lastAccepted =
+                location.clone();
+
         state.lastProgressPosition =
                 location.clone();
 
         state.lastAcceptedAt = now;
         state.lastProgressAt = now;
+        state.lastMeaningfulProgressAt = now;
 
         states.put(
                 player.getUniqueId(),
@@ -429,19 +442,16 @@ public final class BedrockMovementFixPlugin
 
         logDiagnostic(
                 player,
-                "JOIN bedrock=" + isBedrock(player)
-        );
-
-        debug(
-                player,
-                "JOIN bedrock=" + isBedrock(player)
+                "JOIN bedrock="
+                        + isBedrock(player)
         );
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onQuit(PlayerQuitEvent event) {
 
-        Player player = event.getPlayer();
+        Player player =
+                event.getPlayer();
 
         State state =
                 states.remove(
@@ -449,9 +459,11 @@ public final class BedrockMovementFixPlugin
                 );
 
         if (state != null) {
+
             logDiagnostic(
                     player,
-                    "QUIT phase=" + state.phase
+                    "QUIT phase="
+                            + state.phase
             );
         }
     }
@@ -466,25 +478,31 @@ public final class BedrockMovementFixPlugin
             return;
         }
 
-        Player player = event.getPlayer();
+        Player player =
+                event.getPlayer();
 
         if (!tracked(player)) {
             return;
         }
 
-        Location to = event.getTo();
+        Location to =
+                event.getTo();
 
-        if (to == null || to.getWorld() == null) {
+        if (to == null
+                || to.getWorld() == null) {
             return;
         }
 
-        State state = state(player);
+        State state =
+                state(player);
+
         long now = now();
 
         Location previous =
                 state.lastAccepted;
 
         double delta = 0.0D;
+
         Vector direction = null;
 
         if (previous != null
@@ -498,33 +516,36 @@ public final class BedrockMovementFixPlugin
                                     previous.toVector()
                             );
 
-            delta = displacement.length();
+            delta =
+                    displacement.length();
 
             if (delta > 0.00001D) {
+
                 direction =
                         displacement.normalize();
             }
         }
 
-        /*
-         * Keep direction even during zero-delta movement.
-         * This is important because Bedrock may continue sending
-         * movement attempts while the server position does not advance.
-         */
         if (direction != null) {
 
             state.lastDirection =
                     direction.clone();
 
-            state.lastDirectionAt = now;
+            state.lastDirectionAt =
+                    now;
         }
 
         state.lastAccepted =
                 to.clone();
 
-        state.lastAcceptedAt = now;
-        state.lastMoveAt = now;
-        state.lastActivityAt = now;
+        state.lastAcceptedAt =
+                now;
+
+        state.lastMoveAt =
+                now;
+
+        state.lastActivityAt =
+                now;
 
         state.progressSamples.addLast(
                 new MovementSample(
@@ -539,34 +560,20 @@ public final class BedrockMovementFixPlugin
                 now
         );
 
-        /*
-         * Only meaningful forward progress updates this timestamp.
-         */
         if (delta >= minimumProgressDistance) {
 
             state.lastMeaningfulProgressAt =
                     now;
 
-            state.lastProgressAt = now;
+            state.lastProgressAt =
+                    now;
 
-            /*
-             * This is the important correction anchor.
-             * Do NOT continuously overwrite it with every movement.
-             */
             state.lastProgressPosition =
                     to.clone();
         }
 
         boolean special =
                 nearSpecial(player);
-
-        debug(
-                player,
-                "MOVE delta="
-                        + fmt(delta)
-                        + " special="
-                        + special
-        );
 
         logDiagnostic(
                 player,
@@ -576,6 +583,14 @@ public final class BedrockMovementFixPlugin
                         + special
                         + " phase="
                         + state.phase
+        );
+
+        debug(
+                player,
+                "MOVE delta="
+                        + fmt(delta)
+                        + " special="
+                        + special
         );
     }
 
@@ -599,13 +614,18 @@ public final class BedrockMovementFixPlugin
         state.lastTeleportAt = now;
         state.lastActivityAt = now;
         state.lastMoveAt = now;
-        state.lastMeaningfulProgressAt = now;
-        state.lastProgressAt = now;
+
+        state.lastMeaningfulProgressAt =
+                now;
+
+        state.lastProgressAt =
+                now;
 
         state.failures.clear();
         state.progressSamples.clear();
 
-        state.phase = Phase.NORMAL;
+        state.phase =
+                Phase.NORMAL;
 
         state.hardStallSince = 0L;
         state.consecutiveHardStallSamples = 0;
@@ -623,16 +643,11 @@ public final class BedrockMovementFixPlugin
             state.lastProgressPosition =
                     location.clone();
 
-            state.lastAcceptedAt = now;
+            state.lastAcceptedAt =
+                    now;
         }
 
         logDiagnostic(
-                player,
-                "TELEPORT cause="
-                        + event.getCause()
-        );
-
-        debug(
                 player,
                 "TELEPORT cause="
                         + event.getCause()
@@ -656,15 +671,23 @@ public final class BedrockMovementFixPlugin
 
         long now = now();
 
-        state.lastWorldChangeAt = now;
-        state.lastActivityAt = now;
-        state.lastMoveAt = now;
-        state.lastMeaningfulProgressAt = now;
+        state.lastWorldChangeAt =
+                now;
+
+        state.lastActivityAt =
+                now;
+
+        state.lastMoveAt =
+                now;
+
+        state.lastMeaningfulProgressAt =
+                now;
 
         state.failures.clear();
         state.progressSamples.clear();
 
-        state.phase = Phase.NORMAL;
+        state.phase =
+                Phase.NORMAL;
 
         state.hardStallSince = 0L;
         state.consecutiveHardStallSamples = 0;
@@ -679,12 +702,14 @@ public final class BedrockMovementFixPlugin
         state.lastProgressPosition =
                 location.clone();
 
-        state.lastAcceptedAt = now;
+        state.lastAcceptedAt =
+                now;
 
         logDiagnostic(
                 player,
                 "WORLD_CHANGE world="
-                        + player.getWorld().getName()
+                        + player.getWorld()
+                        .getName()
         );
     }
 
@@ -706,7 +731,9 @@ public final class BedrockMovementFixPlugin
         State state =
                 state(player);
 
-        state.lastActivityAt = now();
+        state.lastActivityAt =
+                now();
+
         state.interactions++;
 
         String block =
@@ -717,14 +744,6 @@ public final class BedrockMovementFixPlugin
                         .name();
 
         logDiagnostic(
-                player,
-                "INTERACT action="
-                        + event.getAction()
-                        + " block="
-                        + block
-        );
-
-        debug(
                 player,
                 "INTERACT action="
                         + event.getAction()
@@ -748,7 +767,9 @@ public final class BedrockMovementFixPlugin
         State state =
                 state(player);
 
-        state.lastActivityAt = now();
+        state.lastActivityAt =
+                now();
+
         state.animations++;
 
         logDiagnostic(
@@ -756,15 +777,12 @@ public final class BedrockMovementFixPlugin
                 "ANIMATION type="
                         + event.getAnimationType()
         );
-
-        debug(
-                player,
-                "ANIMATION type="
-                        + event.getAnimationType()
-        );
     }
 
-    @EventHandler(priority = EventPriority.MONITOR)
+    @EventHandler(
+            priority = EventPriority.MONITOR,
+            ignoreCancelled = true
+    )
     public void onFailMove(
             PlayerFailMoveEvent event
     ) {
@@ -788,11 +806,16 @@ public final class BedrockMovementFixPlugin
         String reason =
                 event.getFailReason().name();
 
-        state.lastFailAt = now;
-        state.lastActivityAt = now;
+        state.lastFailAt =
+                now;
+
+        state.lastActivityAt =
+                now;
 
         if ("CLIPPED_INTO_BLOCK".equals(reason)) {
-            state.lastClippedAt = now;
+
+            state.lastClippedAt =
+                    now;
         }
 
         state.failures.addLast(
@@ -813,14 +836,6 @@ public final class BedrockMovementFixPlugin
                         now
                 );
 
-        debug(
-                player,
-                "FAIL_MOVE reason="
-                        + reason
-                        + " clippedRecent="
-                        + clipped
-        );
-
         logDiagnostic(
                 player,
                 "FAIL_MOVE reason="
@@ -831,10 +846,20 @@ public final class BedrockMovementFixPlugin
                         + state.phase
         );
 
+        debug(
+                player,
+                "FAIL_MOVE reason="
+                        + reason
+                        + " clippedRecent="
+                        + clipped
+        );
+
         /*
-         * NEVER:
+         * INTENTIONALLY NO:
          *
          * event.setAllowed(true);
+         *
+         * The failed movement remains rejected by Paper.
          */
     }
 
@@ -878,12 +903,13 @@ public final class BedrockMovementFixPlugin
                             player,
                             state,
                             state.phase
-                                    + " -> NORMAL "
-                                    + "reason=left-special-area"
+                                    + " -> NORMAL"
+                                    + " reason=left-special-area"
                     );
                 }
 
                 resetDetection(state);
+
                 continue;
             }
 
@@ -944,14 +970,9 @@ public final class BedrockMovementFixPlugin
                             now
                     );
 
-            /*
-             * Either side can open suspicion.
-             *
-             * CLIPPED -> SUSPECTED
-             * STALL   -> SUSPECTED
-             */
             boolean anySignal =
-                    clippedSignal || hardStall;
+                    clippedSignal
+                            || hardStall;
 
             switch (state.phase) {
 
@@ -984,8 +1005,8 @@ public final class BedrockMovementFixPlugin
                         logState(
                                 player,
                                 state,
-                                "SUSPECTED -> NORMAL "
-                                        + "reason=recovery"
+                                "SUSPECTED -> NORMAL"
+                                        + " reason=recovery"
                         );
 
                         resetDetection(state);
@@ -994,13 +1015,6 @@ public final class BedrockMovementFixPlugin
                     }
 
                     if (!active) {
-
-                        logState(
-                                player,
-                                state,
-                                "SUSPECTED -> NORMAL "
-                                        + "reason=inactive"
-                        );
 
                         resetDetection(state);
 
@@ -1014,8 +1028,8 @@ public final class BedrockMovementFixPlugin
                         logState(
                                 player,
                                 state,
-                                "SUSPECTED -> NORMAL "
-                                        + "reason=window-expired"
+                                "SUSPECTED -> NORMAL"
+                                        + " reason=window-expired"
                         );
 
                         resetDetection(state);
@@ -1023,14 +1037,6 @@ public final class BedrockMovementFixPlugin
                         continue;
                     }
 
-                    /*
-                     * CONFIRMATION CANDIDATE:
-                     *
-                     * 1. hard stall
-                     * 2. direction held
-                     * 3. player keeps sending movement
-                     * 4. CLIPPED exists in same correlation window
-                     */
                     if (clippedSignal
                             && hardStall
                             && directionHeld
@@ -1065,8 +1071,8 @@ public final class BedrockMovementFixPlugin
                         logState(
                                 player,
                                 state,
-                                "STALLING -> NORMAL "
-                                        + "reason=recovery"
+                                "STALLING -> NORMAL"
+                                        + " reason=recovery"
                         );
 
                         resetDetection(state);
@@ -1084,8 +1090,8 @@ public final class BedrockMovementFixPlugin
                         logState(
                                 player,
                                 state,
-                                "STALLING -> NORMAL "
-                                        + "reason=condition-lost"
+                                "STALLING -> NORMAL"
+                                        + " reason=condition-lost"
                         );
 
                         resetDetection(state);
@@ -1096,13 +1102,6 @@ public final class BedrockMovementFixPlugin
                     if (now
                             - state.stallingAt
                             > correlationWindowMs) {
-
-                        logState(
-                                player,
-                                state,
-                                "STALLING -> NORMAL "
-                                        + "reason=window-expired"
-                        );
 
                         resetDetection(state);
 
@@ -1124,10 +1123,6 @@ public final class BedrockMovementFixPlugin
                                 player,
                                 state,
                                 "STALLING -> CONFIRMED"
-                                        + " hardSamples="
-                                        + state.consecutiveHardStallSamples
-                                        + " clipped="
-                                        + clipped
                         );
                     }
                 }
@@ -1139,8 +1134,8 @@ public final class BedrockMovementFixPlugin
                         logState(
                                 player,
                                 state,
-                                "CONFIRMED -> NORMAL "
-                                        + "reason=recovery"
+                                "CONFIRMED -> NORMAL"
+                                        + " reason=recovery"
                         );
 
                         resetDetection(state);
@@ -1158,8 +1153,8 @@ public final class BedrockMovementFixPlugin
                         logState(
                                 player,
                                 state,
-                                "CONFIRMED -> NORMAL "
-                                        + "reason=condition-lost"
+                                "CONFIRMED -> NORMAL"
+                                        + " reason=condition-lost"
                         );
 
                         resetDetection(state);
@@ -1167,9 +1162,6 @@ public final class BedrockMovementFixPlugin
                         continue;
                     }
 
-                    /*
-                     * One-shot only.
-                     */
                     if (now
                             - state.lastCorrectionAt
                             >= correctionCooldownMs) {
@@ -1183,24 +1175,6 @@ public final class BedrockMovementFixPlugin
                     }
                 }
             }
-
-            debug(
-                    player,
-                    "WATCH phase="
-                            + state.phase
-                            + " clipped="
-                            + clipped
-                            + " hardStall="
-                            + hardStall
-                            + " hardSamples="
-                            + state.consecutiveHardStallSamples
-                            + " directionHeld="
-                            + directionHeld
-                            + " trying="
-                            + tryingToMove
-                            + " recovery="
-                            + recovery
-            );
         }
     }
 
@@ -1222,12 +1196,9 @@ public final class BedrockMovementFixPlugin
         }
 
         int consecutive = 0;
+
         long since = 0L;
 
-        /*
-         * We need the MOST RECENT consecutive zero/near-zero
-         * movement samples.
-         */
         MovementSample[] samples =
                 state.progressSamples.toArray(
                         new MovementSample[0]
@@ -1255,6 +1226,7 @@ public final class BedrockMovementFixPlugin
                         sample.time;
 
             } else {
+
                 break;
             }
         }
@@ -1278,6 +1250,18 @@ public final class BedrockMovementFixPlugin
 
         if (state.lastClippedAt <= 0
                 || state.hardStallSince <= 0) {
+            return false;
+        }
+
+        if (now
+                - state.lastClippedAt
+                > correlationWindowMs) {
+            return false;
+        }
+
+        if (now
+                - state.hardStallSince
+                > correlationWindowMs) {
             return false;
         }
 
@@ -1307,14 +1291,9 @@ public final class BedrockMovementFixPlugin
             long now
     ) {
 
-        /*
-         * Zero-delta PlayerMoveEvents are still activity.
-         *
-         * This is exactly what we need for the Bedrock stall case.
-         */
-        return state.lastMoveAt > 0
+        return state.lastActivityAt > 0
                 && now
-                - state.lastMoveAt
+                - state.lastActivityAt
                 <= Math.min(
                         activityWindowMs,
                         correlationWindowMs
@@ -1373,6 +1352,14 @@ public final class BedrockMovementFixPlugin
         state.recoverySamples = 0;
     }
 
+    /**
+     * Correction is NOT a movement bypass.
+     *
+     * It NEVER teleports to the rejected destination.
+     *
+     * It only restores the player to the last meaningful
+     * position that the server had already accepted.
+     */
     private void correctOnce(
             Player player,
             State state,
@@ -1384,41 +1371,77 @@ public final class BedrockMovementFixPlugin
                 player.getLocation();
 
         Location target =
-                current.clone();
+                state.lastProgressPosition;
 
-        /*
-         * Use the LAST MEANINGFUL PROGRESS position,
-         * not lastAccepted.
-         *
-         * lastAccepted is updated every PlayerMoveEvent,
-         * including zero-progress movement.
-         */
-        if (correctionMode
-                == CorrectionMode.LAST_PROGRESS
-                && state.lastProgressPosition != null
-                && state.lastProgressPosition.getWorld() != null
-                && state.lastProgressPosition
-                .getWorld()
-                .equals(current.getWorld())
-                && current.distance(
-                        state.lastProgressPosition
-                ) <= maxRestoreDistance) {
+        if (target == null
+                || target.getWorld() == null
+                || current.getWorld() == null
+                || !target.getWorld()
+                .equals(current.getWorld())) {
 
-            target =
-                    state.lastProgressPosition
-                            .clone();
-
-            target.setYaw(
-                    current.getYaw()
+            logDiagnostic(
+                    player,
+                    "CORRECTION_REJECTED"
+                            + " reason=no-valid-anchor"
             );
 
-            target.setPitch(
-                    current.getPitch()
-            );
+            resetDetection(state);
+
+            return;
         }
 
-        final Location correctionTarget =
+        if (current.distance(target)
+                > maxRestoreDistance) {
+
+            logDiagnostic(
+                    player,
+                    "CORRECTION_REJECTED"
+                            + " reason=anchor-too-far"
+                            + " distance="
+                            + fmt(
+                            current.distance(target)
+                    )
+            );
+
+            resetDetection(state);
+
+            return;
+        }
+
+        Location correctionTarget =
                 target.clone();
+
+        correctionTarget.setYaw(
+                current.getYaw()
+        );
+
+        correctionTarget.setPitch(
+                current.getPitch()
+        );
+
+        /*
+         * Critical safety check:
+         *
+         * The correction target itself must be physically
+         * valid. We never teleport the player into a block.
+         */
+        if (!isSafePlayerPosition(
+                player,
+                correctionTarget
+        )) {
+
+            logDiagnostic(
+                    player,
+                    "CORRECTION_REJECTED"
+                            + " reason=target-collision"
+                            + " target="
+                            + loc(correctionTarget)
+            );
+
+            resetDetection(state);
+
+            return;
+        }
 
         final long correctionId =
                 ++state.correctionId;
@@ -1427,8 +1450,10 @@ public final class BedrockMovementFixPlugin
                 now;
 
         /*
-         * Consume confirmation immediately.
-         * This prevents multiple corrections.
+         * Consume the confirmation immediately.
+         *
+         * This prevents repeated corrections while the
+         * scheduled teleport is pending.
          */
         state.phase =
                 Phase.NORMAL;
@@ -1436,8 +1461,8 @@ public final class BedrockMovementFixPlugin
         logState(
                 player,
                 state,
-                "CONFIRMED -> NORMAL "
-                        + "reason=correction-armed"
+                "CONFIRMED -> NORMAL"
+                        + " reason=correction-armed"
                         + " id="
                         + correctionId
         );
@@ -1449,16 +1474,6 @@ public final class BedrockMovementFixPlugin
                         + correctionId
                         + " clipped="
                         + clipped
-                        + " mode="
-                        + correctionMode
-                        + " target="
-                        + loc(correctionTarget)
-        );
-
-        debug(
-                player,
-                "CORRECTION_ARMED id="
-                        + correctionId
                         + " target="
                         + loc(correctionTarget)
         );
@@ -1482,14 +1497,50 @@ public final class BedrockMovementFixPlugin
                     }
 
                     /*
+                     * Revalidate immediately before teleport.
+                     *
+                     * The world may have changed between
+                     * detection and execution.
+                     */
+                    if (!isSafePlayerPosition(
+                            player,
+                            correctionTarget
+                    )) {
+
+                        logDiagnostic(
+                                player,
+                                "CORRECTION_CANCELLED"
+                                        + " id="
+                                        + correctionId
+                                        + " reason=target-no-longer-safe"
+                        );
+
+                        return;
+                    }
+
+                    /*
                      * EXACTLY ONE teleport.
                      *
-                     * Never schedule repeating corrections.
+                     * Never use event.setAllowed(true).
+                     * Never teleport to event.getTo().
                      */
-                    player.teleport(
-                            correctionTarget,
-                            PlayerTeleportEvent.TeleportCause.PLUGIN
-                    );
+                    boolean success =
+                            player.teleport(
+                                    correctionTarget,
+                                    PlayerTeleportEvent.TeleportCause.PLUGIN
+                            );
+
+                    if (!success) {
+
+                        logDiagnostic(
+                                player,
+                                "CORRECTION_FAILED"
+                                        + " id="
+                                        + correctionId
+                        );
+
+                        return;
+                    }
 
                     long time =
                             now();
@@ -1530,6 +1581,9 @@ public final class BedrockMovementFixPlugin
                     state.consecutiveStallingSamples =
                             0;
 
+                    state.recoverySamples =
+                            0;
+
                     logDiagnostic(
                             player,
                             "CORRECTION_SENT"
@@ -1538,16 +1592,226 @@ public final class BedrockMovementFixPlugin
                                     + " target="
                                     + loc(correctionTarget)
                     );
-
-                    debug(
-                            player,
-                            "CORRECTION_SENT id="
-                                    + correctionId
-                                    + " target="
-                                    + loc(correctionTarget)
-                    );
                 }
         );
+    }
+
+    /**
+     * Full player AABB validation.
+     *
+     * This does not make special blocks passable.
+     *
+     * A target is safe only if the player's bounding box
+     * does not overlap any collision shape at the target.
+     */
+    private boolean isSafePlayerPosition(
+            Player player,
+            Location target
+    ) {
+
+        if (target == null
+                || target.getWorld() == null) {
+            return false;
+        }
+
+        World world =
+                target.getWorld();
+
+        BoundingBox currentBox =
+                player.getBoundingBox();
+
+        Location current =
+                player.getLocation();
+
+        double dx =
+                target.getX()
+                        - current.getX();
+
+        double dy =
+                target.getY()
+                        - current.getY();
+
+        double dz =
+                target.getZ()
+                        - current.getZ();
+
+        BoundingBox targetBox =
+                currentBox.shift(
+                        dx,
+                        dy,
+                        dz
+                );
+
+        int minX =
+                floor(targetBox.getMinX());
+
+        int maxX =
+                floor(
+                        targetBox.getMaxX()
+                );
+
+        int minY =
+                floor(targetBox.getMinY());
+
+        int maxY =
+                floor(
+                        targetBox.getMaxY()
+                );
+
+        int minZ =
+                floor(targetBox.getMinZ());
+
+        int maxZ =
+                floor(targetBox.getMaxZ());
+
+        /*
+         * Include one block of safety around the AABB.
+         */
+        minX--;
+        maxX++;
+
+        minY--;
+        maxY++;
+
+        minZ--;
+        maxZ++;
+
+        for (int x = minX;
+             x <= maxX;
+             x++) {
+
+            for (int y = minY;
+                 y <= maxY;
+                 y++) {
+
+                for (int z = minZ;
+                     z <= maxZ;
+                     z++) {
+
+                    Block block =
+                            world.getBlockAt(
+                                    x,
+                                    y,
+                                    z
+                            );
+
+                    if (block.getType()
+                            == Material.AIR) {
+                        continue;
+                    }
+
+                    /*
+                     * Block state check.
+                     */
+                    BlockData data =
+                            block.getBlockData();
+
+                    if (data == null) {
+                        continue;
+                    }
+
+                    /*
+                     * If the block has no collision,
+                     * it cannot physically trap the player.
+                     */
+                    if (block.isPassable()
+                            && block.getCollisionShape()
+                            .getBoundingBoxes()
+                            .isEmpty()) {
+
+                        continue;
+                    }
+
+                    /*
+                     * Check actual collision shape rather
+                     * than simply assuming a full cube.
+                     */
+                    for (BoundingBox shape :
+                            block.getCollisionShape()
+                                    .getBoundingBoxes()) {
+
+                        BoundingBox worldShape =
+                                shape.shift(
+                                        x,
+                                        y,
+                                        z
+                                );
+
+                        if (targetBox.overlaps(
+                                worldShape
+                        )) {
+
+                            logDiagnostic(
+                                    player,
+                                    "AABB_BLOCK_COLLISION"
+                                            + " block="
+                                            + block.getType()
+                                            + " xyz="
+                                            + x + ","
+                                            + y + ","
+                                            + z
+                            );
+
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+
+        /*
+         * Additional feet/head sanity checks.
+         */
+        if (!isPassableAt(
+                world,
+                target.getX(),
+                target.getY(),
+                target.getZ()
+        )) {
+
+            return false;
+        }
+
+        if (!isPassableAt(
+                world,
+                target.getX(),
+                target.getY()
+                        + player.getHeight()
+                        - 0.05D,
+                target.getZ()
+        )) {
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private boolean isPassableAt(
+            World world,
+            double x,
+            double y,
+            double z
+    ) {
+
+        Block block =
+                world.getBlockAt(
+                        floor(x),
+                        floor(y),
+                        floor(z)
+                );
+
+        /*
+         * Passable is necessary but not sufficient;
+         * also inspect the collision shape.
+         */
+        if (!block.isPassable()) {
+            return false;
+        }
+
+        return block.getCollisionShape()
+                .getBoundingBoxes()
+                .isEmpty();
     }
 
     private boolean eligible(
@@ -1641,6 +1905,9 @@ public final class BedrockMovementFixPlugin
                             now;
 
                     state.lastProgressAt =
+                            now;
+
+                    state.lastMeaningfulProgressAt =
                             now;
 
                     return state;
@@ -1835,9 +2102,6 @@ public final class BedrockMovementFixPlugin
                         + message
         );
 
-        /*
-         * Debug is also persisted.
-         */
         logDiagnostic(
                 player,
                 "DEBUG " + message
@@ -1852,8 +2116,7 @@ public final class BedrockMovementFixPlugin
 
         logDiagnostic(
                 player,
-                "STATE "
-                        + message
+                "STATE " + message
         );
     }
 
@@ -1887,6 +2150,13 @@ public final class BedrockMovementFixPlugin
         );
     }
 
+    private static int floor(
+            double value
+    ) {
+
+        return (int) Math.floor(value);
+    }
+
     private static String fmt(
             double value
     ) {
@@ -1914,10 +2184,12 @@ public final class BedrockMovementFixPlugin
     }
 
     private static long now() {
+
         return System.currentTimeMillis();
     }
 
     private enum Phase {
+
         NORMAL,
         SUSPECTED,
         STALLING,
