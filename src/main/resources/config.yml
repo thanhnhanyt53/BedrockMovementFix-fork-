@@ -1,0 +1,36 @@
+# BedrockMovementFix 2.0.0
+# This plugin intentionally does NOT force Paper to accept failed movement.
+# It only corrects repeated, small movement validation failures with a cooldown.
+
+enabled: true
+debug: false
+
+# Permission that completely bypasses the plugin.
+bypass-permission: "bedrockmovementfix.bypass"
+
+# Only process players recognized as Bedrock/Floodgate players.
+bedrock-only: true
+
+# Number of failed moves within the window before a correction is considered.
+failure-threshold: 3
+
+# Sliding window for failures, in milliseconds.
+failure-window-ms: 1000
+
+# Minimum time between corrections for the same player.
+correction-cooldown-ms: 1500
+
+# Do not correct if the player has recently teleported.
+teleport-grace-ms: 1200
+
+# Do not correct immediately after join/server-switch-like initialization.
+join-grace-ms: 2500
+
+# Maximum distance allowed for a corrective teleport.
+# Larger deviations are left to Paper's normal movement validation.
+max-correction-distance: 1.75
+
+# Never correct if the player is dead, in spectator, or currently changing world.
+ignore-dead: true
+ignore-spectator: true
+ignore-world-change: true

@@ -1,0 +1,12 @@
+name: BedrockMovementFix
+version: 2.0.0
+main: com.votri.bedrockmovementfix.BedrockMovementFixPlugin
+api-version: '26.1'
+author: VoTri
+description: Safe Bedrock movement correction for Geyser/Floodgate
+softdepend:
+  - floodgate
+permissions:
+  bedrockmovementfix.bypass:
+    description: Bypass all BedrockMovementFix processing
+    default: op
