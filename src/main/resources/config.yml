@@ -1,43 +1,56 @@
-# BedrockMovementFix (fork) 2.0.0
+# BedrockMovementFix 2.1.0
+# Watchdog mode. No ProtocolLib or PacketEvents dependency.
 #
-# This version deliberately does NOT force Paper to accept failed movement.
-# Paper remains authoritative over movement validation.
+# IMPORTANT:
+# Bukkit/Paper cannot see Bedrock packets that were lost before reaching
+# the backend. This watchdog detects a server-observable stall pattern and
+# can send ONE authoritative Bukkit teleport/sync pulse. It does NOT
+# teleport every tick and never calls PlayerFailMoveEvent#setAllowed(true).
 
 enabled: true
-debug: false
+debug: true
 
-# Only process players recognized by Floodgate.
 bedrock-only: true
-
-# Permission that completely bypasses this plugin.
 bypass-permission: "bedrockmovementfix.bypass"
 
-# Consecutive failures required inside failure-window-ms.
-failure-threshold: 3
-failure-window-ms: 1000
+# Watchdog polling interval.
+watchdog-interval-ticks: 5
 
-# Minimum time between plugin corrections.
-correction-cooldown-ms: 1500
+# Consider the player stalled when there is no accepted movement for this
+# many milliseconds while activity continues.
+stall-ms: 700
 
-# Do not correct immediately after a teleport.
-teleport-grace-ms: 1200
+# Activity remains "fresh" for this long after interaction/animation.
+activity-window-ms: 900
 
-# Do not correct immediately after join.
+# After a correction, do not correct again for this long.
+correction-cooldown-ms: 3000
+
+# Ignore players shortly after join/teleport/world change.
 join-grace-ms: 2500
+teleport-grace-ms: 1200
+world-change-grace-ms: 1200
 
-# Only perform a correction when the failed target is close to the
-# last server-accepted position. Large jumps are left to Paper.
-max-correction-distance: 1.75
+# Only trigger the special-block branch when the player is within this
+# horizontal/vertical radius of a configured block.
+special-block-radius: 1.75
 
-# Safety exclusions.
+# Correction safety:
+#  - same-location: resend the server-authoritative position/rotation once.
+#  - last-accepted: restore the last accepted position only if it differs
+#    by no more than max-restore-distance.
+correction-mode: same-location
+max-restore-distance: 1.50
+
+# Special block signals.
+special-blocks:
+  - BAMBOO
+  - BAMBOO_SAPLING
+
+# FailMove signals are diagnostic and can qualify a watchdog incident.
+handle-fail-move: true
+
+# Do not correct players in these states.
 ignore-dead: true
 ignore-spectator: true
-ignore-world-change: true
-
-# Which Paper 26.1.2 fail reasons may trigger the conservative correction.
-# MOVED_TOO_QUICKLY is the primary candidate for Bedrock rubber-band issues.
-handle:
-  moved-too-quickly: true
-  moved-wrongly: true
-  clipped-into-block: false
-  moved-into-unloaded-chunk: false
+ignore-vehicles: true

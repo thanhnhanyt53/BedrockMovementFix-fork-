@@ -1,9 +1,9 @@
 name: BedrockMovementFix
-version: 2.0.0
+version: 2.1.0
 main: com.votri.bedrockmovementfix.BedrockMovementFixPlugin
 api-version: '1.21'
-author: ThanhNhan-thanhnhan0928
-description: Conservative Bedrock movement correction for Geyser/Floodgate on Paper
+author: VoTri
+description: Conservative Bedrock movement watchdog for Paper 1.21.11
 softdepend:
   - floodgate
 
