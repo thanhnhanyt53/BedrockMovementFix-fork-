@@ -1,14 +1,18 @@
-# BedrockMovementFix 2.1.3
+# BedrockMovementFix 2.1.4
 
 Paper 1.21.11 / Java 21.
 
-2.1.3 only allows correction after BOTH signals are present:
-1. A CLIPPED_INTO_BLOCK failure burst.
-2. Genuine loss of server-side positional progress in the recent movement direction.
+## Detection model
 
-Hysteresis:
-NORMAL -> SUSPECTED -> CONFIRMED -> one-shot CORRECTION.
+2.1.4 correlates two separate signals within a 1500 ms window:
 
-Ordinary clipped movement with continued positional progress is ignored.
-The plugin never calls PlayerFailMoveEvent#setAllowed(true), never runs a
-repeating teleport task, and has no ProtocolLib/PacketEvents dependency.
+1. `CLIPPED_INTO_BLOCK` burst opens `SUSPECTED`.
+2. Consecutive near-zero server movement samples (`0.000`-like hard stall)
+   can move the player to `CONFIRMED`.
+3. If normal movement resumes, `SUSPECTED` or `CONFIRMED` is immediately
+   cancelled.
+4. Only a confirmed, still-stalled case receives one correction.
+5. No repeating teleport and no `PlayerFailMoveEvent#setAllowed(true)`.
+
+The correction is deliberately conservative and does not depend on
+ProtocolLib or PacketEvents.
