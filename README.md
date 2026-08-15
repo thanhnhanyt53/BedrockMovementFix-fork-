@@ -1,13 +1,18 @@
-# BedrockMovementFix 2.1.1
+# BedrockMovementFix 2.1.2
 
-Paper 1.21.11 / Java 21. Conservative watchdog for Bedrock movement validation around special blocks.
+Paper 1.21.11 / Java 21.
 
-Key changes from 2.1.0:
-- CLIPPED_INTO_BLOCK burst is the primary signal.
-- Interaction/animation are diagnostic/activity signals, not mandatory prerequisites.
-- Requires repeated clipped failures + movement stall + special-block proximity.
-- One-shot correction with cooldown.
-- Never calls PlayerFailMoveEvent#setAllowed(true).
-- No ProtocolLib or PacketEvents dependency.
-- No repeating teleport loop.
-- Debug correlation IDs for corrections.
+2.1.2 changes the watchdog from "no PlayerMoveEvent" stall detection to a
+CLIPPED_INTO_BLOCK burst + restricted movement pattern detector.
+
+Correction requires:
+- Bedrock/Floodgate player
+- near configured special block
+- >= fail-move-threshold CLIPPED_INTO_BLOCK failures in fail-move-window-ms
+- recent activity
+- cooldown ready
+- several recent movement samples that are below movement-low-delta
+- no meaningful movement progress for movement-desync-window-ms
+
+It never calls PlayerFailMoveEvent#setAllowed(true), never loops teleport,
+and has no ProtocolLib/PacketEvents dependency.
