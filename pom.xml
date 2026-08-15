@@ -5,7 +5,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.votri</groupId>
   <artifactId>BedrockMovementFix</artifactId>
-  <version>2.1.4</version>
+  <version>2.1.5</version>
   <name>BedrockMovementFix</name>
   <properties>
     <maven.compiler.release>21</maven.compiler.release>

@@ -1,18 +1,33 @@
-# BedrockMovementFix 2.1.4
+# BedrockMovementFix 2.1.5
 
 Paper 1.21.11 / Java 21.
 
-## Detection model
+## Detection state machine
 
-2.1.4 correlates two separate signals within a 1500 ms window:
+`NORMAL -> SUSPECTED -> STALLING -> CONFIRMED -> one-shot correction`
 
-1. `CLIPPED_INTO_BLOCK` burst opens `SUSPECTED`.
-2. Consecutive near-zero server movement samples (`0.000`-like hard stall)
-   can move the player to `CONFIRMED`.
-3. If normal movement resumes, `SUSPECTED` or `CONFIRMED` is immediately
-   cancelled.
-4. Only a confirmed, still-stalled case receives one correction.
-5. No repeating teleport and no `PlayerFailMoveEvent#setAllowed(true)`.
+- `CLIPPED_INTO_BLOCK` burst opens `SUSPECTED`.
+- Micro-stalls do not correct.
+- `STALLING` requires a hard zero-distance stall and a held movement direction.
+- Continued hard stall is required before `CONFIRMED`.
+- Recovery immediately cancels `SUSPECTED`, `STALLING`, or `CONFIRMED`.
+- Correction is one-shot and cooldown-protected.
+- No `PlayerFailMoveEvent#setAllowed(true)`.
+- No repeating teleport.
+- No ProtocolLib/PacketEvents dependency.
 
-The correction is deliberately conservative and does not depend on
-ProtocolLib or PacketEvents.
+## Diagnostic file
+
+The plugin now writes asynchronous diagnostics to:
+
+`plugins/BedrockMovementFix/bedrock-movement-fix.log`
+
+with one rotated `.1` backup when the configured size is exceeded.
+
+Relevant config:
+
+```yaml
+log-file-enabled: true
+log-file-name: bedrock-movement-fix.log
+log-file-max-bytes: 2097152
+```
