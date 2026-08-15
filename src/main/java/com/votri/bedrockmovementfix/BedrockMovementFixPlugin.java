@@ -158,6 +158,7 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
         }
 
         debug(player, "MOVE delta=" + fmt(delta) + " special=" + nearSpecial(player));
+        if (diagnosticLogger != null) diagnosticLogger.log(player.getName(), "MOVE delta=" + fmt(delta) + " special=" + nearSpecial(player));
     }
 
     @EventHandler(priority=EventPriority.MONITOR)
@@ -175,6 +176,8 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
         state.failures.clear();
         state.progressSamples.clear();
         state.phase = Phase.NORMAL;
+        state.hardStallSince = 0L;
+        state.consecutiveHardStallSamples = 0;
 
         if (event.getTo() != null) {
             state.lastAccepted = event.getTo().clone();
@@ -199,6 +202,8 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
         state.failures.clear();
         state.progressSamples.clear();
         state.phase = Phase.NORMAL;
+        state.hardStallSince = 0L;
+        state.consecutiveHardStallSamples = 0;
         state.lastAccepted = player.getLocation().clone();
         state.lastAcceptedAt = now;
 
@@ -246,6 +251,10 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
 
         debug(player, "FAIL_MOVE reason=" + reason +
                 " clippedRecent=" + recentClipped(state, now));
+        if (diagnosticLogger != null) {
+            diagnosticLogger.log(player.getName(), "FAIL_MOVE reason=" + reason
+                    + " clippedRecent=" + recentClipped(state, now));
+        }
 
         // Intentionally never call event.setAllowed(true).
     }
@@ -256,7 +265,6 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
 
         for (Player player : Bukkit.getOnlinePlayers()) {
             if (!tracked(player)) continue;
-
             State state = states.get(player.getUniqueId());
             if (state == null || !eligible(player, state, now)) continue;
 
@@ -269,80 +277,81 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
             trimProgressSamples(state, now);
 
             long clipped = recentClipped(state, now);
-            boolean clippedBurst = clipped >= failThreshold;
-            boolean active = now - state.lastActivityAt <= activityWindowMs;
-            boolean recentClippedSignal = state.lastClippedAt > 0
+            boolean clippedSignal = state.lastClippedAt > 0
                     && now - state.lastClippedAt <= correlationWindowMs;
-
             boolean hardStall = updateHardStall(state, now);
-            boolean recovery = updateRecovery(state, now);
             boolean directionHeld = hasHeldDirection(state, now);
+            boolean tryingToMove = playerStillTryingToMove(state, now);
+            boolean recovery = updateRecovery(state, now);
+            boolean active = now - state.lastActivityAt <= activityWindowMs;
+
+            // Bidirectional correlation: either signal can open suspicion.
+            boolean anySignal = clippedSignal || hardStall;
 
             switch (state.phase) {
                 case NORMAL -> {
-                    if (clippedBurst && active) {
+                    if (anySignal && active) {
                         state.phase = Phase.SUSPECTED;
                         state.suspectedAt = now;
-                        logState(player, state, "NORMAL -> SUSPECTED clipped=" + clipped);
+                        logState(player, state,
+                                "NORMAL -> SUSPECTED clipped=" + clipped
+                                        + " hardStall=" + hardStall
+                                        + " hardSince=" + state.hardStallSince);
                     }
                 }
 
                 case SUSPECTED -> {
-                    if (!recentClippedSignal || !active) {
+                    if (!active || recovery) {
                         resetDetection(state);
-                        logState(player, state, "SUSPECTED -> NORMAL reason=signal-expired");
-                    } else if (recovery) {
+                        logState(player, state, "SUSPECTED -> NORMAL reason="
+                                + (recovery ? "recovery" : "inactive"));
+                    } else if (now - state.suspectedAt > correlationWindowMs) {
                         resetDetection(state);
-                        logState(player, state, "SUSPECTED -> NORMAL reason=recovery");
-                    } else if (hardStall && directionHeld
-                            && now - state.suspectedAt <= correlationWindowMs) {
+                        logState(player, state, "SUSPECTED -> NORMAL reason=window-expired");
+                    } else if (clippedSignal
+                            && hardStall
+                            && directionHeld
+                            && tryingToMove
+                            && correlated(state, now)) {
                         state.phase = Phase.STALLING;
                         state.stallingAt = now;
                         state.consecutiveStallingSamples = state.consecutiveHardStallSamples;
-                        logState(player, state, "SUSPECTED -> STALLING hardSamples="
-                                + state.consecutiveHardStallSamples);
-                    } else if (now - state.suspectedAt > correlationWindowMs) {
-                        resetDetection(state);
-                        logState(player, state, "SUSPECTED -> NORMAL reason=correlation-timeout");
+                        logState(player, state, "SUSPECTED -> STALLING clipped=" + clipped
+                                + " hardSamples=" + state.consecutiveHardStallSamples);
                     }
                 }
 
                 case STALLING -> {
-                    if (!recentClippedSignal || !active) {
+                    if (!active || recovery) {
                         resetDetection(state);
-                        logState(player, state, "STALLING -> NORMAL reason=signal-expired");
-                    } else if (recovery) {
+                        logState(player, state, "STALLING -> NORMAL reason="
+                                + (recovery ? "recovery" : "inactive"));
+                    } else if (now - state.stallingAt > correlationWindowMs
+                            || !correlated(state, now)
+                            || !clippedSignal) {
                         resetDetection(state);
-                        logState(player, state, "STALLING -> NORMAL reason=recovery");
-                    } else {
-                        if (hardStall && directionHeld) {
-                            state.consecutiveStallingSamples++;
-                        } else {
-                            state.consecutiveStallingSamples = 0;
-                        }
-
-                        if (state.consecutiveStallingSamples >= stallingRequiredSamples
-                                && now - state.stallingAt <= correlationWindowMs) {
+                        logState(player, state, "STALLING -> NORMAL reason=correlation-lost");
+                    } else if (hardStall && directionHeld && tryingToMove) {
+                        state.consecutiveStallingSamples++;
+                        if (state.consecutiveStallingSamples >= stallingRequiredSamples) {
                             state.phase = Phase.CONFIRMED;
                             state.confirmedAt = now;
                             logState(player, state, "STALLING -> CONFIRMED hardSamples="
                                     + state.consecutiveStallingSamples);
-                        } else if (now - state.stallingAt > correlationWindowMs) {
-                            resetDetection(state);
-                            logState(player, state, "STALLING -> NORMAL reason=stall-window-expired");
                         }
                     }
                 }
 
                 case CONFIRMED -> {
-                    if (!recentClippedSignal || !active) {
+                    if (!active || recovery) {
                         resetDetection(state);
-                        logState(player, state, "CONFIRMED -> NORMAL reason=signal-expired");
-                    } else if (recovery) {
+                        logState(player, state, "CONFIRMED -> NORMAL reason="
+                                + (recovery ? "recovery" : "inactive"));
+                    } else if (!correlated(state, now) || !clippedSignal
+                            || !hardStall || !directionHeld || !tryingToMove) {
                         resetDetection(state);
-                        logState(player, state, "CONFIRMED -> NORMAL reason=recovery");
-                    } else if (hardStall && directionHeld
-                            && now - state.confirmedAt <= correlationWindowMs
+                        logState(player, state, "CONFIRMED -> NORMAL reason=confirmation-condition-lost");
+                    } else if (now - state.confirmedAt <= correlationWindowMs
                             && now - state.lastCorrectionAt >= correctionCooldownMs) {
                         correctOnce(player, state, now, clipped);
                     }
@@ -353,45 +362,57 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
                     + " clipped=" + clipped
                     + " hardStall=" + hardStall
                     + " hardSamples=" + state.consecutiveHardStallSamples
-                    + " stallSamples=" + state.consecutiveStallingSamples
+                    + " hardSince=" + state.hardStallSince
                     + " directionHeld=" + directionHeld
+                    + " trying=" + tryingToMove
                     + " recovery=" + recovery);
         }
     }
 
     private boolean updateHardStall(State state, long now) {
-        if (state.progressSamples.isEmpty()
-                || state.lastDirection == null
+        if (state.progressSamples.isEmpty() || state.lastDirection == null
                 || now - state.lastDirectionAt > correlationWindowMs) {
             state.consecutiveHardStallSamples = 0;
+            state.hardStallSince = 0L;
             return false;
         }
 
         int consecutive = 0;
+        long since = 0L;
         for (MovementSample sample : state.progressSamples) {
             if (now - sample.time > correlationWindowMs) continue;
+
             if (sample.delta <= hardStallZeroDistance) {
+                if (consecutive == 0) since = sample.time;
                 consecutive++;
             } else {
                 consecutive = 0;
+                since = 0L;
             }
         }
+
         state.consecutiveHardStallSamples = consecutive;
+        state.hardStallSince = consecutive > 0 ? since : 0L;
         return consecutive >= hardStallRequiredSamples;
     }
 
-    private boolean hasHeldDirection(State state, long now) {
-        if (state.lastDirection == null || now - state.lastDirectionAt > correlationWindowMs) return false;
+    private boolean correlated(State state, long now) {
+        if (state.lastClippedAt <= 0 || state.hardStallSince <= 0) return false;
+        return Math.abs(state.lastClippedAt - state.hardStallSince) <= correlationWindowMs;
+    }
 
-        for (MovementSample sample : state.progressSamples) {
-            if (now - sample.time > correlationWindowMs || sample.direction == null) continue;
-            if (sample.delta >= minimumProgressDistance) {
-                if (sample.direction.dot(state.lastDirection) >= directionDotThreshold) {
-                    return true;
-                }
-            }
-        }
-        return true;
+    private boolean hasHeldDirection(State state, long now) {
+        return state.lastDirection != null
+                && now - state.lastDirectionAt <= correlationWindowMs;
+    }
+
+    private boolean playerStillTryingToMove(State state, long now) {
+        // Zero-delta PlayerMoveEvents still refresh lastMoveAt. This distinguishes
+        // an active client repeatedly attempting movement from an inactive player.
+        return state.lastMoveAt > 0
+                && now - state.lastMoveAt <= Math.min(activityWindowMs, correlationWindowMs)
+                && state.lastDirection != null
+                && now - state.lastDirectionAt <= correlationWindowMs;
     }
 
     private boolean updateRecovery(State state, long now) {
@@ -415,6 +436,7 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
         state.suspectedAt = 0L;
         state.stallingAt = 0L;
         state.confirmedAt = 0L;
+        state.hardStallSince = 0L;
         state.consecutiveHardStallSamples = 0;
         state.consecutiveStallingSamples = 0;
         state.recoverySamples = 0;
@@ -483,6 +505,11 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
                 " clipped=" + clipped +
                 " mode=" + correctionMode +
                 " target=" + loc(correctionTarget));
+        if (diagnosticLogger != null) {
+            diagnosticLogger.log(player.getName(), "CORRECTION_ARMED id=" + correctionId
+                    + " clipped=" + clipped + " mode=" + correctionMode
+                    + " target=" + loc(correctionTarget));
+        }
 
         Bukkit.getScheduler().runTask(this, () -> {
             if (!player.isOnline() || !tracked(player)) return;
@@ -503,6 +530,10 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
 
             debug(player, "CORRECTION_SENT id=" + correctionId +
                     " target=" + loc(correctionTarget));
+            if (diagnosticLogger != null) {
+                diagnosticLogger.log(player.getName(), "CORRECTION_SENT id=" + correctionId
+                        + " target=" + loc(correctionTarget));
+            }
         });
     }
 
@@ -645,7 +676,7 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
     private static final class State {
         long joinAt, lastMoveAt, lastAcceptedAt, lastMeaningfulProgressAt;
         long lastActivityAt, lastTeleportAt, lastWorldChangeAt, lastFailAt, lastCorrectionAt;
-        long lastDirectionAt, suspectedAt, stallingAt, confirmedAt, lastClippedAt;
+        long lastDirectionAt, suspectedAt, stallingAt, confirmedAt, lastClippedAt, hardStallSince;
         int consecutiveHardStallSamples, consecutiveStallingSamples, recoverySamples;
         long interactions, animations, correctionId;
 
