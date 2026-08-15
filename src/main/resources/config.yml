@@ -1,4 +1,4 @@
-# BedrockMovementFix 2.1.3
+# BedrockMovementFix 2.1.4
 # Correction requires BOTH a CLIPPED_INTO_BLOCK burst and real loss of
 # server-side positional progress. Ordinary clipped movement is ignored.
 enabled: true
@@ -15,7 +15,7 @@ fail-move-window-ms: 1000
 # Hysteresis:
 # SUSPECTED is entered when the two signals begin to overlap.
 # CONFIRMED requires sustained loss of positional progress.
-suspect-window-ms: 1000
+suspect-window-ms: 1500
 confirmation-window-ms: 500
 
 # Progress test.
@@ -25,6 +25,12 @@ minimum-progress-distance: 0.08
 minimum-progress-samples: 3
 progress-sample-window-ms: 700
 minimum-stalled-samples: 3
+
+# Correlates a previous CLIPPED_INTO_BLOCK burst with a later hard stall.
+# A hard stall is consecutive zero-distance server movement samples.
+correlation-window-ms: 1500
+hard-stall-zero-distance: 0.005
+hard-stall-required-samples: 3
 
 # Player must have recent movement/activity; standing still is never a reason
 # for correction.
