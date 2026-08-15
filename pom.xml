@@ -6,9 +6,9 @@
 
     <groupId>com.votri</groupId>
     <artifactId>BedrockMovementFix</artifactId>
-    <version>2.0.0</version>
+    <version>2.1.0</version>
     <name>BedrockMovementFix</name>
-    <description>Conservative Bedrock movement correction for Paper 1.21.11+ / 26.2 + Geyser/Floodgate</description>
+    <description>Conservative Bedrock movement watchdog for Paper 1.21.11</description>
 
     <properties>
         <maven.compiler.release>21</maven.compiler.release>
