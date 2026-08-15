@@ -172,14 +172,21 @@ public final class BedrockMovementFixPlugin extends JavaPlugin implements Listen
         }
         s.lastCorrection=n; s.correctionId++;
         long id=s.correctionId;
-        debug(p,"CORRECTION_ARMED id="+id+" clipped="+clipped+" mode="+correctionMode);
+        final Location correctionTarget = target.clone();
+        final long correctionId = id;
+        debug(p,"CORRECTION_ARMED id="+correctionId+" clipped="+clipped+" mode="+correctionMode);
         Bukkit.getScheduler().runTask(this,()->{
             if(!p.isOnline() || !tracked(p)) return;
             // One-shot only. No repeating task and no fail-move allowance.
-            p.teleport(target, PlayerTeleportEvent.TeleportCause.PLUGIN);
-            long t=now(); s.lastTeleport=t; s.lastAccepted=target.clone(); s.lastAcceptedAt=t; s.lastMove=t;
-            s.lastActivity=0; s.fails.clear();
-            debug(p,"CORRECTION_SENT id="+id+" target="+loc(target));
+            p.teleport(correctionTarget, PlayerTeleportEvent.TeleportCause.PLUGIN);
+            long t=now();
+            s.lastTeleport=t;
+            s.lastAccepted=correctionTarget.clone();
+            s.lastAcceptedAt=t;
+            s.lastMove=t;
+            s.lastActivity=0;
+            s.fails.clear();
+            debug(p,"CORRECTION_SENT id="+correctionId+" target="+loc(correctionTarget));
         });
     }
 
